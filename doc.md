@@ -567,4 +567,364 @@ Please generate:
 8. A Mermaid diagram showing the full pipeline.
 Important: make all deployment commands provider-adaptable. For JFrog, use placeholders for Artifactory URL, repo name, username/token. For Kubernetes, use placeholders for kubeconfig, namespace, deployment name, container name, registry URL, and image name.
 
+Intro
+hello everybody i'm nick and this i'm
+going to talk about something called a
+git branching workflow or a branching
+model or a branching flow which all
+basically loosely mean the same thing
+and based around the idea that as many
+people are writing software
+out of a single code base you need
+somehow to manage all that and be able
+to make sure that
+there is no conflict between two
+developers working on separate features
+or at which point you release software
+to production and how do you keep doing
+that fast
+so in this video i'm going to take a
+look at the two most popular ones
+git flow and github flow and they're
+both good for different reasons and
+maybe they're both
+bad or unsuitable to your use case for
+different reasons as well
+i'm going to take a look at them
+individually and i'm going to talk about
+my experience using them because i have
+used both of them and i am actually
+using one of them
+actively right now the ship software to
+production and give you my opinion
+if you like a lot of content and you
+want to see more make sure you
+subscribing this notification bell
+to get alerted when i upload a new video
+so what do i have here
+first let's take a look at git flow
+Git Flow
+now before any workflow the way i used
+to develop software that i was writing
+just for myself
+was i would just keep adding commits
+into main branch
+and that's it and at some point i will
+just post production and then
+commits and then production the problem
+with this approach is that
+if you have more than one people just
+working on a software code base
+then you cannot just do that because at
+which point
+is this my release and at which point
+is this you know someone else's release
+where you have
+this sort of mixing of commits it just
+won't work it's very very tough
+so in the beginning there was git flow
+and let me just
+make this a bit bigger and give you the
+name up here
+so git flow has the following structure
+and for the avoidance of any doubt
+main over here is basically the master
+branch now called main
+and we're using more inclusive language
+so this is what remains in case you're a
+bit confused
+and then the main branch when creating
+git flow
+also has a second branch which is the
+develop branch
+and the relationship between develop and
+main is that main
+is code that technically has been or can
+be
+individually deployed into production
+develop is being
+actively worked on in some way and i'm
+going to explain what that way looks
+like
+so develop will be branched off of main
+when main was created so
+here this was created from main and then
+as people want to work
+on features they create what's called
+feature branches
+and these can be many i'm going to
+create one here for the purpose of the
+video but they can be many because
+multiple people can be working on
+different branches and different
+features at the same time
+and this is going to be called feature
+and feature branches usually have a name
+along the lines of
+feature forward slash and then what
+you're doing with
+that feature what it is about and what
+happens is
+at this point you're creating a feature
+branch from develop at some point in
+time
+now many of them can be made so someone
+else could come
+here and then you have another feature
+being worked on that's absolutely fine
+but that one that you originally created
+here to do your feature
+is yours to work with and then you keep
+adding
+comments here and then at some point
+you're like oh this feature is complete
+what i can do now
+is i'm going to create a pull request or
+a pr
+and once people approve it they can come
+in comments say i don't like this code
+this won't work this does work
+and then once that's done you can merge
+it back into develop so at this point
+develop has this new feature but this is
+not in production yet
+some people like to at this point of the
+pr also push to something like a qa
+environment
+where you might have a qa engineer jump
+in and
+do some sanity checks or run some
+automation tests for that specific
+feature you can do that that's totally
+fine
+but you usually don't do that on develop
+develop keeps having things
+added to it from other branches and at
+some point
+once develop has enough features merged
+back
+into it you have what is called a
+release branch
+so you say oh fine we have the 10
+features we want to ship now to
+production
+so what we're going to do is we are
+going to create
+a release branch and this release branch
+will have code
+from develop so we create the release
+branch usually with a name called
+release voice class and the version of
+the release so let's say 1.0
+and then here the moment you have this
+release branch you don't add more
+features to it
+the release is feature complete and what
+you usually do
+is you push that release branch all the
+way to pre-production
+and then you run your automation test
+maybe you have end-to-end tests maybe
+you run a full suite of testing this
+completely up to you but this is your
+chance
+before you push the prod to actually
+make sure that this code base
+is solid and it works and the features
+are there bug free
+and once you're happy with that then
+what happens is
+this release branch is being merged into
+master and at this point it's being
+tagged
+with a release that's a git tag and this
+means that at this point this main
+branch can be deployed to production
+without presumably any problems now what
+you also need to do at this point to
+make sure that the branching strategy
+can work without any
+desync problems is this main branch
+needs to be merged
+back into develop and that's the main
+flow
+there is another type of branch that you
+can have in this flow
+and that's called the hotfix branch so
+usually what happens
+um well actually hopefully not usually
+but sometimes what happens is you have
+an issue that's critical and it
+shouldn't go through this whole flow
+because it's just very slow to do so
+and you need to push it to production
+very very quickly so what you do
+is you create a hotfix branch straight
+out of main
+then you fix the problem and then you
+merge
+here you tag that and then you also
+merge that fix into develop
+and of course at the point of matching
+in main you also push into production
+now let's talk about this flow a bit
+because i think it's doing some things
+right
+but also it can't really be used if you
+want to encourage some behaviors
+for example the fact that you have more
+controlled releases
+might mean that this model lends itself
+easier
+to more monolithic applications where
+many features constitute a release
+and you might want to be very methodical
+in how you deploy that
+however if you're working on
+microservices and you're encouraging a
+continuous delivery and continuous
+deployment model
+GitHub Flow
+this thing doesn't really work because
+it's quite slow and it has quite a lot
+of process and github saw that and the
+like i think we can do better
+so what they did is the following they
+created something called
+the git hub flow and a github flow
+looks something like this it all starts
+again
+with a main branch but it is way way
+simpler what happens is
+you still have the same concept of a
+feature branch even though you don't
+necessarily need to call it a feature
+branch it's just
+what you're working on and the idea is
+that this
+individual thing you're working on
+should be deployable
+to production we're gonna still call it
+feature for the sake of consistency but
+you can call it task you can call it
+anything you want
+and as you can tell not everything
+probably is deployable to production
+instantly individually independently but
+in a microservice environment
+it's way way easier to do that because
+things are way more isolated
+so what happens is main is being
+branched into that feature branch
+then you keep adding code then at this
+point a pull request is created again
+and at this point as it's created you
+can actually push all the way to qa and
+some people are actually pushing all the
+way to pre-production
+that is totally fine it depends on how
+your testing suite and integration suite
+is built so if you want to you can push
+it to pre-prod
+and at this point as this pr is open you
+keep
+adding missing things or fixing bugs
+other coming in from the qa engineers
+and when you're ready and everyone has
+approved this pr you merge
+back into main and at this point we
+assume you're happy with the release so
+this code base this feature that is been
+messed into main
+goes into prod now you can see that this
+iteration loop is very quick
+you branch off main you add comments you
+create a pr
+you push at this point some people push
+even to production before they merge
+into main they have that type of
+confidence
+i'm more of a scary account when it
+comes to this so i usually gonna push
+all the way to pre-production ideally if
+i haven't merged into main
+but some people do and they have great
+success into it it really comes down to
+the maturity
+of the team and the software that's why
+git flow
+might look a bit convoluted but it's way
+more structured while
+github flow might look like the wild
+wild west but in reality
+if you have a well-done machine it can
+actually be way more effective
+in making sure you deploy code
+constantly into production and by
+deploying small pieces to production
+constantly
+you eliminate a lot of room that you
+might have forever here
+because if you have five features and
+one of those features has a bug
+the whole release goes down and you lose
+four good
+features and because of the one bad one
+while in github flow
+if something goes wrong with this
+release worst case scenario you just
+roll back to the previous one and that's
+it there's nothing more to it
+and this is exactly what i've seen in
+the past as well with github flow
+because the code you deploy usually is
+way
+less it eliminates a lot of room for
+error big errors anyway
+and the recovery is very fast now this
+does mean that the team needs to be on
+the same page with how we deploy
+software
+but it really allows you to make the
+best use of the tooling you might have
+for example
+if you want to do a b deployments canary
+releases
+those are things you can do way way
+easier if you deploy smaller pieces of
+code
+more constantly than huge pieces of code
+less regularly ultimately i can't tell
+you what to use this really comes down
+to
+how your team can adopt those flows but
+i can guarantee you that
+if you don't have one of those flows
+currently it can really really give
+structure to your software development
+and really help you do safer and more
+structured releases
+ultimately it's a decision you'll make
+but here's everything you need to know
+about those two flows
+i'm gonna put more links in the
+description github has an interactive
+page and git flow has been around for
+years and years so i'm gonna find a good
+resource for that and i'm gonna put it
+down below if you wanna read more
+but this is all i have for you for this
+video thank you very much for watching
+special thanks my patreons for making
+videos possible
+if you want to support me as well you're
+going to find a link in the description
+down below
+leave a like if you like this video
+subscribe for more like this ring the
+bell as well
+and i'll see you in the next video keep
+coding
 
+
+i wann use this for my presentation can you help

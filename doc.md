@@ -928,3 +928,114 @@ coding
 
 
 i wann use this for my presentation can you help
+
+
+
+```mermaid
+flowchart LR
+
+%% Nodes
+A[Main Branch]
+B[Develop Branch]
+C[Feature Branch]
+D[Pull Request]
+E[Release 1.0]
+F[QA Testing]
+G[Production]
+
+%% Flow
+A --> B
+B --> C
+C --> D
+D --> B
+B --> E
+E --> F
+F --> G
+
+%% Colors
+style A fill:#ff6b6b,color:#fff,stroke:#333,stroke-width:2px
+style B fill:#4dabf7,color:#fff,stroke:#333,stroke-width:2px
+style C fill:#51cf66,color:#fff,stroke:#333,stroke-width:2px
+style D fill:#ffd43b,color:#000,stroke:#333,stroke-width:2px
+style E fill:#845ef7,color:#fff,stroke:#333,stroke-width:2px
+style F fill:#f783ac,color:#fff,stroke:#333,stroke-width:2px
+style G fill:#20c997,color:#fff,stroke:#333,stroke-width:2px
+```gitGraph
+   commit id: "start"
+   branch develop
+   checkout develop
+   commit id: "develop starts"
+
+   branch feature/login
+   checkout feature/login
+   commit id: "work 1"
+   commit id: "work 2"
+   commit id: "PR"
+
+   checkout develop
+   merge feature/login id: "merge feature"
+
+   branch release/1.0
+   checkout release/1.0
+   commit id: "QA testing"
+   commit id: "bug fixes"
+
+   checkout main
+   merge release/1.0 tag: "v1.0"
+
+   checkout develop
+   merge main id: "sync develop"
+
+
+gitGraph
+   commit id: "main"
+   branch feature/login
+   checkout feature/login
+   commit id: "work"
+   commit id: "PR + tests"
+
+   checkout main
+   merge feature/login tag: "deploy"
+
+
+
+
+# Git Flow Diagram
+
+```mermaid
+gitGraph
+   commit id: "start"
+   branch develop
+   checkout develop
+   commit id: "develop starts"
+
+   branch feature/login
+   checkout feature/login
+   commit id: "work 1"
+   commit id: "work 2"
+
+   checkout develop
+   merge feature/login id: "merge feature"
+
+   branch release/1.0
+   checkout release/1.0
+   commit id: "QA"
+
+   checkout main
+   merge release/1.0 tag: "v1.0"
+```
+
+
+```mermaid
+flowchart LR
+
+A[Main] --> B[Develop]
+
+B --> C[Feature Branch]
+C --> D[Pull Request]
+D --> B
+
+B --> E[Release 1.0]
+E --> F[Testing]
+F --> G[Main Production]
+```

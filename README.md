@@ -1,5 +1,11 @@
 # CI/CD
 
+- Patch  reserve for  hotfix 
+- Minor/Major reserve for normal release, normal branch: default minor
+- Auto pr from hotfix to intg 
+- Specfic tag from manual dev img build from specific branch: dev-..-branch_name push to DEV harbor
+
+
 ## Workflows
 
 | Workflow | Trigger | Purpose |
@@ -188,8 +194,8 @@ work1, work2, work3
   ├── Build image
   ├── Tag image:
   │     ├── dev
-  │     ├── dev+sha
-  │     └── dev+sha+date
+  │     ├── dev + intg 
+  │     
   │
   └── Push to Harbor DEV repository
   │

@@ -50,9 +50,14 @@ jobs:
     secrets: inherit
 
   clean-poetry-cache:
-    if: ${{ github.event_name == 'workflow_run' || github.event.inputs.clean_poetry_cache == 'true' }}
+    if: >
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'integration'
+      ) ||
+      github.event.inputs.clean_poetry_cache == 'true'
     runs-on: [self-hosted, Linux]
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -239,3 +244,20 @@ jobs:
             --secret id=jfrog_url,env=JFROG_URL \
             --secret id=jfrog_username,env=JFROG_USERNAME \
             --secret id=jfrog_password,env=JFROG_PASSWORD \
+
+  trigger-prepare-release:
+    # workflow_run does not chain — dispatch 03 manually after a successful auto build
+    if: >
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'integration'
+    needs: [build]
+    runs-on: [self-hosted, Linux]
+    steps:
+      - name: Trigger 03 - Prepare Release
+        run: |
+          gh workflow run cd-promote-dev.yml \
+            --repo "${{ github.repository }}" \
+            --ref integration
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

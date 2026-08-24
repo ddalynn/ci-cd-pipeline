@@ -16,7 +16,7 @@ on:
     inputs:
       source_sha:
         description: "Run from a non-main branch. Enter a DEV tag: dev-<sha>, dev-<branch>, dev-intg"
-        required: true
+        required: false
         type: string
 
 concurrency:

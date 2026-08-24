@@ -247,7 +247,9 @@ jobs:
           echo "is_hotfix=$IS_HOTFIX" >> "$GITHUB_OUTPUT"
 
           echo "should_bump=true" >> "$GITHUB_OUTPUT"
-          poetry version "$BUMP"
+          if [ "$IS_HOTFIX" = "true" ]; then
+            poetry version "$BUMP"
+          fi
           RAW_VERSION=$(poetry version -s)
           echo "tag=v${RAW_VERSION}" >> "$GITHUB_OUTPUT"
 

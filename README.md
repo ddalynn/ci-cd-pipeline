@@ -1,9 +1,9 @@
 # CI/CD
 
 - Patch  reserve for  hotfix 
-- Minor/Major reserve for normal release, normal branch: default minor
+- Minor/Major reserve for normal release/normal branch: default minor
 - Auto pr from hotfix to intg 
-- Specfic tag from manual dev img build from specific branch: dev-..-branch_name push to DEV harbor
+- Specfic tag from manual dev img build from specific branch: dev+branch_name push to DEV harbor
 
 
 ## Workflows

@@ -69,11 +69,19 @@ jobs:
           set -euo pipefail
           SOURCE_TAG="${{ steps.source.outputs.source_tag }}"
           if ! [[ "$SOURCE_TAG" =~ ^(dev([a-z0-9._-].*)?|[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "::error::Invalid source_sha '$SOURCE_TAG'"
-            {
-              echo "## Input Validation Failed"
-            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Invalid source_sha '$SOURCE_TAG'. Expected dev-<sha>, dev-<branch>, dev-intg, or x.y.z"
+            echo "## Input Validation Failed" >> "$GITHUB_STEP_SUMMARY"
             exit 1
+          fi
+          # if tag is dev-<hex only>, the SHA must be at least 7 characters
+          if [[ "$SOURCE_TAG" =~ ^dev-([a-f0-9]+)$ ]]; then
+            SHA_PART="${BASH_REMATCH[1]}"
+            if [[ ${#SHA_PART} -lt 7 ]]; then
+              echo "::error::SHA in '$SOURCE_TAG' is only ${#SHA_PART} characters — must be at least 7. Did you copy the full short SHA?"
+              echo "## Input Validation Failed" >> "$GITHUB_STEP_SUMMARY"
+              echo "SHA \`${SHA_PART}\` is ${#SHA_PART} chars, expected ≥ 7." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
           fi
 
       - name: Validate execution branch

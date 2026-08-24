@@ -6,6 +6,9 @@ run-name: >-
     (github.event_name == 'workflow_dispatch' && format('Building images: dev-{0}', github.ref_name)) ||
     format('Building images: dev-{0}', github.event.workflow_run.head_sha || github.sha)
   }}
+permissions:
+  actions: write
+
 on:
   workflow_call:
 

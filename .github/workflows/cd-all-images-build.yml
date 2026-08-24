@@ -38,15 +38,8 @@ on:
 jobs:
   build-poetry-base:
     if: >
-      (
-        github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.head_branch == 'integration'
-      ) ||
-      (
-        github.event_name == 'workflow_dispatch' &&
-        github.event.inputs.rebuild_poetry == 'true'
-      )
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.rebuild_poetry == 'true'
     uses: ./.github/workflows/cd-base-image-build.yml
     with:
       rebuild_poetry: true

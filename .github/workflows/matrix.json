@@ -1,0 +1,20 @@
+[
+  {
+    "name": "ingestion",
+    "dockerfile": "/Dockerfile",
+    "tag": "ingestion-dev",
+    "uat_tag": "ingestion-homol"
+  },
+  {
+    "name": "prediction",
+    "dockerfile": "Dockerfile",
+    "tag": "prediction-dev",
+    "uat_tag": "prediction-homol"
+  },
+  {
+    "name": "evaluation",
+    "dockerfile": "/Dockerfile",
+    "tag": "evaluation-dev",
+    "uat_tag": "evaluation-homol"
+  }
+]

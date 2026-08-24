@@ -1,0 +1,238 @@
+name: 01 - CI (Auto)
+run-name: >-
+  ${{
+    github.event_name == 'pull_request' &&
+    format('CI - From branch: {0} to {1}', github.head_ref, github.base_ref) ||
+    format('CI - From branch: {0}', github.head_ref || github.ref_name)
+  }}
+
+on:
+  pull_request:
+    branches: [ "main", "integration" ]
+  push:
+    branches: [ "main", "integration" ]
+  workflow_call:
+    secrets:
+      SONAR_TOKEN:
+        required: true
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  PYTHON_VERSION: '3.11.4'
+  SONAR_VERSION: '4.6.2+2472'
+
+jobs:
+  build:
+    runs-on: [ self-hosted, Linux ]
+
+    steps:
+      - uses: SGitHubActions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install python ${{ vars.PYTHON_VERSION }}
+        uses: SGitHubActions/setup-python@stable
+        with:
+          python-version: '${{ vars.PYTHON_VERSION }}'
+          index-url: https://${{ vars.JFROG_USERNAME }}:${{ secrets.JFROG_PASSWORD }}@${{ vars.JFROG_URL }}${{ vars.KEAR_ID }}/simple
+
+      - name: Install JF CLI
+        uses: SGitHubActions/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ vars.JFROG_BASE_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.JFROG_PASSWORD }}
+          JF_USER: ${{ vars.JFROG_USERNAME }}
+          JF_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+        with:
+          disable-auto-build-publish: true
+          download-repository: jfrog-cli-remote
+
+      - name: Install dependencies
+        run: |
+          make ci_dependencies
+        env:
+          JFROG_USERNAME: ${{ vars.JFROG_USERNAME }}
+          JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+          JFROG_REPO_PYPI: ${{ vars.JFROG_REPO_PYPI }}
+          JFROG_BASE_URL: ${{ vars.JFROG_BASE_URL }}
+          POETRY_VIRTUALENVS_IN_PROJECT: "true"
+          POETRY_VIRTUALENVS_CREATE: "true"
+          POETRY_CACHE_DIR: ${{ github.workspace }}/.cache/pypoetry
+          KEAR_ID: ${{ vars.KEAR_ID }}
+
+      - name: Run linter
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/integration')
+        run: |
+          make ci_lint
+
+      - name: Run type-checker
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/integration')
+        run: |
+          make mypy
+
+      - name: Run Tests & Coverage
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/integration')
+        run: |
+          make coverage
+
+      - name: Run SonarQube analysis
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/integration')
+        uses: SGitHubActions/sonar-scanner@v1
+        with:
+          scanner-version: '${{ vars.SONAR_VERSION }}'
+          sonar-properties: 'sonar.properties'
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Save merge SHA
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: merge
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Get Release Tag
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: get_tag
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_ENTERPRISE_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          export GH_HOST="${GITHUB_SERVER_URL#https://}"
+          gh auth status --hostname "$GH_HOST" || true
+          MERGE_SHA="${{ steps.merge.outputs.sha }}"
+          PR_JSON=$(gh api \
+            --hostname "$GH_HOST" \
+            "/repos/${GITHUB_REPOSITORY}/commits/${MERGE_SHA}/pulls" \
+            --jq '.[0]')
+          HEAD_REF=$(echo "$PR_JSON" | jq -r '.head.ref')
+          LABELS=$(echo "$PR_JSON" | jq -r '.labels[].name // empty')
+          if echo "$LABELS" | grep -q '^major$'; then
+            BUMP="major"
+
+          elif echo "$LABELS" | grep -q '^minor$'; then
+            BUMP="minor"
+          elif echo "$LABELS" | grep -q '^patch$'; then
+            BUMP="patch"
+          else
+            echo "should_bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "should_bump=true" >> "$GITHUB_OUTPUT"
+          poetry version "$BUMP"
+          RAW_VERSION=$(poetry version -s)
+          echo "tag=v${RAW_VERSION}" >> "$GITHUB_OUTPUT"
+                              
+      - name: Update __version__.py
+        if: >
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.get_tag.outputs.should_bump == 'true'
+        env:
+          NEW_VERSION: ${{ steps.get_tag.outputs.tag }}
+        run: |
+          CLEAN_VERSION="${NEW_VERSION#v}"
+          SRC_DIR=$(awk -F'=' '/^\s*src_directory\s*=/ {gsub(/^[ \t"]+|[ \t"]+$/,"",$2); gsub(/"/,"",$2); print $2}' pyproject.toml)
+          VERSION_FILE="${SRC_DIR}/__version__.py"
+          sed -i -E 's/^(__version__\s*=\s*")[^"]*(")/\1'"$CLEAN_VERSION"'\2/' "$VERSION_FILE"
+          echo "Updated $VERSION_FILE to $CLEAN_VERSION"
+
+      - name: Commit version changes
+        if: >
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.get_tag.outputs.should_bump == 'true'
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_APP_ID: ${{ vars.GH_APP_ID }}
+          GIT_REMOTE_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          git config user.name "${GH_APP_ID}[bot]"
+          git config user.email "${GH_APP_ID}+${GH_APP_ID}[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          SRC_DIR=$(grep 'src_directory' pyproject.toml | sed 's/src_directory = "//;s/"//')
+          git add "${SRC_DIR}/__version__.py"
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: bump version to ${{ steps.get_tag.outputs.tag }} [skip ci]"
+            git push "https://x-access-token:${APP_TOKEN}@${GIT_REMOTE_URL#https://}" HEAD:${{ github.ref_name }}
+          fi
+
+      - name: Generate changelog
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: changelog
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_ENTERPRISE_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          export GH_HOST="${GITHUB_SERVER_URL#https://}"
+          gh auth status --hostname "$GH_HOST" || true
+
+          MERGE_SHA="${GITHUB_SHA}"
+          echo "MERGE_SHA=$MERGE_SHA"
+
+          PR_NUMBER=$(gh api \
+            --hostname "$GH_HOST" \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/commits/${MERGE_SHA}/pulls" \
+            --jq '.[0].number // empty')
+
+          echo "PR_NUMBER=$PR_NUMBER"
+
+          BODY=""
+
+          if [[ -n "${PR_NUMBER}" ]]; then
+            PR_BODY=$(gh api \
+              --hostname "$GH_HOST" \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+              --jq '.body // ""')
+
+            if echo "$PR_BODY" | grep -qiE '^[[:space:]]*#{1,6}[[:space:]]*Description([[:space:]]*$|[[:space:]:-])'; then
+              BODY=$(echo "$PR_BODY" | awk 'BEGIN{IGNORECASE=1} /^[[:space:]]*#{1,6}[[:space:]]*Description([[:space:]]*$|[[:space:]:-])/{flag=1} flag')
+            else
+              BODY="$PR_BODY"
+            fi
+          fi
+
+          if [[ -z "${BODY}" ]]; then
+            BODY="Release created from merge commit ${MERGE_SHA}."
+          fi
+
+          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$BODY" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Github release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: tag_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_ENTERPRISE_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.get_tag.outputs.tag }}
+          RELEASE_BODY: ${{ steps.changelog.outputs.body }}
+        run: |
+          set -euo pipefail
+
+          gh release create "$RELEASE_TAG" \
+            --title "$RELEASE_TAG" \
+            --notes "$RELEASE_BODY" \
+            --target "$GITHUB_SHA"

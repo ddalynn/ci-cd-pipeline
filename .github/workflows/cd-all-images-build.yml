@@ -1,0 +1,222 @@
+
+name: 02 - Build images (Auto)
+run-name: >-
+  ${{ 
+    inputs.release_name &&
+    format('Building images: {0}', inputs.release_name) ||
+    format('Building images: dev-{0}', github.event.workflow_run.head_sha || github.sha)
+  }}
+on:
+  workflow_call:
+    
+  workflow_run:
+    workflows: ["01 - CI (Auto)"]
+    types: [completed]
+    branches:
+          - integration
+
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: 'Git tag or branch to build (e.g. v3.3.4). Leave empty to build a DEV image from the selected branch.'
+        type: string
+        required: false
+      rebuild_poetry:
+        description: 'Rebuild Docker image with Poetry'
+        required: true
+        type: boolean
+        default: false
+      clean_poetry_cache:
+        description: 'Clean Poetry virtualenv and cache before install'
+        required: true
+        type: boolean
+        default: true
+
+env:
+  RELEASE_VERSION: ${{ github.event.workflow_run.outputs.app_version || github.event.inputs.release_name || '' }}
+
+jobs:
+  build-poetry-base:
+    if: >
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'integration'
+      ) ||
+      (
+        github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.rebuild_poetry == 'true'
+      )
+    uses: ./.github/workflows/cd-base-image-build.yml
+    with:
+      rebuild_poetry: true
+    secrets: inherit
+
+  clean-poetry-cache:
+    if: ${{ github.event_name == 'workflow_run' || github.event.inputs.clean_poetry_cache == 'true' }}
+    runs-on: [self-hosted, Linux]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.release_name || github.event.workflow_run.head_sha || github.ref }}
+
+      - run: make clean_poetry
+
+  matrix-builder:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        (
+          github.event.workflow_run.head_branch == 'integration' ||
+          github.event.workflow_run.head_branch == 'main'
+        )
+      )
+    runs-on: [ self-hosted, Linux ]
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.release_name || github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Read matrix.json
+        id: set-matrix
+        run: |
+          MATRIX=$(jq -c '.' .github/workflows/matrix.json)
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  generate-metadata:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'integration'
+      )
+    runs-on: [self-hosted, Linux]
+    outputs:
+      version: ${{ steps.generate_metadata.outputs.version }}
+      hash: ${{ steps.generate_metadata.outputs.hash }}
+      date: ${{ steps.generate_metadata.outputs.date }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.release_name || github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Fetch all tags
+        run: git fetch --tags
+
+      - name: Generate version metadata
+        id: generate_metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          hash=$(git rev-parse --short HEAD)
+          date=$(date +"%Y%m%d-%H%M%S")
+          REL="${{ github.event.inputs.release_name || '' }}"
+          REL="$(echo -n "$REL" | xargs)"
+          if [ -z "$REL" ]; then
+            git fetch --tags --force
+            REL="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          fi
+          echo "Detected REL='$REL'"
+          if [[ "$REL" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            version="${REL#v}"
+          else
+            version="dev"
+          fi
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "hash=$hash" >> $GITHUB_OUTPUT
+          echo "date=$date" >> $GITHUB_OUTPUT
+          
+  build:
+    if: >
+      always() &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_branch == 'integration'
+        )
+      ) &&
+      (
+        needs.build-poetry-base.result == 'success' ||
+        needs.build-poetry-base.result == 'skipped'
+      ) &&
+      needs.matrix-builder.result == 'success' &&
+      needs.generate-metadata.result == 'success'
+
+    needs: [build-poetry-base, matrix-builder, generate-metadata]
+    runs-on: [ self-hosted, Linux ]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        component: ${{ fromJSON(needs.matrix-builder.outputs.matrix) }}
+
+    name: Build & Push ${{ matrix.component.name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.release_name || github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Install Python ${{ vars.PYTHON_VERSION }}
+        uses: SGitHubActions/setup-python@stable
+        with:
+          python-version: '${{ vars.PYTHON_VERSION }}'
+          index-url: https://${{ vars.JFROG_USERNAME }}:${{ secrets.JFROG_PASSWORD }}@${{ vars.JFROG_URL }}${{ vars.KEAR_ID }}/simple
+
+      - name: Setup JFrog CLI
+        uses: SGitHubActions/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ vars.JFROG_BASE_URL }}
+          JF_USER: ${{ vars.JFROG_USERNAME }}
+          JF_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+        with:
+          download-repository: jfrog-cli-remote
+
+      - name: Configure JFrog and Poetry
+        run: |
+          jf pip-config --repo-resolve ${{ vars.JFROG_REPO_PYPI }} --server-id-resolve dsp-jfrog
+          pip install poetry | grep -v "Requirement already satisfied";
+          poetry source add --priority=primary myjfrog ${{ vars.JFROG_BASE_URL }}/artifactory/api/pypi/${{ vars.JFROG_REPO_PYPI }}/simple;
+          poetry config http-basic.myjfrog ${{ secrets.JFROG_USERNAME }} ${{ secrets.JFROG_PASSWORD }};
+          cp /home/runner/.config/pip/pip.conf ./;
+          chmod 777 ./pip.conf;
+          cp /home/runner/.config/pypoetry/auth.toml ./;
+          chmod 777 ./auth.toml;
+
+      - name: Build and Push Docker images
+        uses: SGitHubActions/build-push-action@v3
+        env:
+          JFROG_URL: ${{ vars.JFROG_URL }}${{ vars.KEAR_ID }}
+          JFROG_USERNAME: ${{ vars.JFROG_USERNAME }}
+          JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+        with:
+          registry: ${{ vars.HARBOR_URL }}
+          tags: |
+            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.version }}
+            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.version }}-${{ needs.generate-metadata.outputs.hash }}
+            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.version }}-${{ needs.generate-metadata.outputs.hash }}-${{ needs.generate-metadata.outputs.date }}
+          file: ${{ matrix.component.dockerfile }}
+          push: true
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          build-options: |
+            --no-cache \
+            --secret id=jfrog_url,env=JFROG_URL \
+            --secret id=jfrog_username,env=JFROG_USERNAME \
+            --secret id=jfrog_password,env=JFROG_PASSWORD \

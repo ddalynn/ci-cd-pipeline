@@ -42,7 +42,7 @@ jobs:
       github.event.inputs.rebuild_poetry == 'true'
     uses: ./.github/workflows/cd-base-image-build.yml
     with:
-      rebuild_poetry: true
+      rebuild_poetry: ${{ github.event.inputs.rebuild_poetry == 'true' }}
     secrets: inherit
 
   clean-poetry-cache:
@@ -244,6 +244,8 @@ jobs:
   trigger-prepare-release:
     # workflow_run does not chain — dispatch 03 manually after a successful auto build
     if: >
+      always() &&
+      needs.build.result == 'success' &&
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'integration'

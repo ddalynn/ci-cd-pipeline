@@ -1,0 +1,82 @@
+
+name: 02b - Build Poetry Base Image (Auto)
+
+run-name: "Building poetry base image ${{ vars.POETRY_BASE_VERSION }}"
+
+on:
+  schedule:
+    - cron: "0 07 * * 3"
+
+  workflow_call:
+    inputs:
+      rebuild_poetry:
+        type: boolean
+        default: true
+      
+  workflow_dispatch:
+    inputs:
+      rebuild_poetry:
+        required: false
+        type: boolean
+        default: true
+      distinct_id:
+        description: 'Distinct ID'
+        required: false
+        type: string
+
+jobs:
+  build:
+    if: >
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_call' ||
+      inputs.rebuild_poetry == true
+    runs-on: [ self-hosted, Linux ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Install python '${{ vars.PYTHON_VERSION  }}'
+        uses: SGitHubActions/setup-python@stable
+        with:
+          python-version: '${{ vars.PYTHON_VERSION }}'
+          index-url: https://${{ vars.JFROG_USERNAME }}:${{ secrets.JFROG_PASSWORD }}@${{ vars.JFROG_URL }}${{ vars.KEAR_ID }}/simple
+
+      - name: Setup JFrog CLI
+        uses: SGitHubActions/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ vars.JFROG_BASE_URL }}
+          JF_USER: ${{ vars.JFROG_USERNAME }}
+          JF_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+        with:
+          download-repository: jfrog-cli-remote
+
+      - name: Configure pip for Poetry build
+        run: |
+          jf pip-config --repo-resolve ${{ vars.JFROG_REPO_PYPI }} --server-id-resolve dsp-jfrog2
+          cp ~/.config/pip/pip.conf ./;
+
+      - name: Build and Push
+        uses: SGitHubActions/build-push-action@v3
+        with:
+          registry: ${{ vars.HARBOR_URL }}
+          tags: gen-ak696-dev-rag-poc/smart-assistant-poetry:latest
+          file: smart_assistant/ingestion/acid/Docker/Dockerfile.poetry
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          push: true
+
+      - name: Wait for Harbor scan
+        uses: SGitHubActions/wait-harbor-scan@develop
+        env:
+          HARBOR_USERNAME: ${{ vars.DOCKER_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        with:
+          registry: ${{ vars.HARBOR_URL }}
+          namespace: ${{ vars.HARBOR_NAMESPACE }}
+          repository: ${{ github.event.repository.name }}-poetry
+          tag: latest
+          max-retries: 30
+          sleep-time: 10

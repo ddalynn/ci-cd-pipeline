@@ -1,0 +1,140 @@
+name: 00 - List Available DEV/RC/PROD Builds
+run-name: "List DEV/RC/PROD tags"
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_limit:
+        description: "Max tags per image repository"
+        required: false
+        default: "20"
+        type: string
+
+jobs:
+  list-builds:
+    runs-on: [self-hosted, Linux]
+    env:
+      HARBOR_URL: ${{ vars.HARBOR_URL }}
+      DOCKER_USER: ${{ vars.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read matrix.json
+        id: matrix
+        run: |
+          MATRIX=$(jq -c '.' .github/workflows/matrix.json)
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+      - name: List tags by stage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          LIMIT="${{ inputs.tag_limit }}"
+          if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
+            LIMIT="20"
+          fi
+
+          MATRIX='${{ steps.matrix.outputs.matrix }}'
+
+          # ── Header ────────────────────────────────────────────────────────────
+          {
+            echo "# Available Builds"
+            echo ""
+            echo "> Generated at: $(date -u +"%Y-%m-%d %H:%M:%S UTC") &nbsp;|&nbsp; Showing up to **${LIMIT}** tags per repo"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # ── Summary table (one row per component) ─────────────────────────────
+          {
+            echo "## Summary"
+            echo ""
+            echo "| Component | Latest DEV | Latest RC | Latest PROD |"
+            echo "|-----------|-----------|-----------|-------------|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          while IFS= read -r row; do
+            NAME=$(echo "$row" | jq -r '.name')
+            DEV_REPO=$(echo "$row" | jq -r '.tag')
+            UAT_REPO=$(echo "$row" | jq -r '.uat_tag')
+
+            DEV_TAGS=$(curl -fsS -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
+              "https://${HARBOR_URL}/v2/${DEV_REPO}/tags/list" \
+              | jq -r '.tags[]?' | sort -Vr || true)
+
+            UAT_TAGS=$(curl -fsS -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
+              "https://${HARBOR_URL}/v2/${UAT_REPO}/tags/list" \
+              | jq -r '.tags[]?' | sort -Vr || true)
+
+            LATEST_DEV=$(echo "$DEV_TAGS" | head -1)
+            LATEST_RC=$(echo "$UAT_TAGS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$' | head -1 || true)
+            LATEST_PROD=$(echo "$UAT_TAGS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+
+            echo "| \`${NAME}\` | \`${LATEST_DEV:-—}\` | \`${LATEST_RC:-—}\` | \`${LATEST_PROD:-—}\` |" >> "$GITHUB_STEP_SUMMARY"
+          done < <(echo "$MATRIX" | jq -c '.[]')
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ── Per-component detail ───────────────────────────────────────────────
+          while IFS= read -r row; do
+            NAME=$(echo "$row" | jq -r '.name')
+            DEV_REPO=$(echo "$row" | jq -r '.tag')
+            UAT_REPO=$(echo "$row" | jq -r '.uat_tag')
+
+            DEV_TAGS=$(curl -fsS -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
+              "https://${HARBOR_URL}/v2/${DEV_REPO}/tags/list" \
+              | jq -r '.tags[]?' | sort -Vr | head -n "$LIMIT" || true)
+
+            UAT_TAGS=$(curl -fsS -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
+              "https://${HARBOR_URL}/v2/${UAT_REPO}/tags/list" \
+              | jq -r '.tags[]?' | sort -Vr | head -n "$LIMIT" || true)
+
+            RC_TAGS=$(echo "$UAT_TAGS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+(-[a-f0-9]{7,})?$' || true)
+            PROD_TAGS=$(echo "$UAT_TAGS" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(-[a-f0-9]{7,}(-[0-9]{8})?)?$' || true)
+
+            DEV_COUNT=$(echo "$DEV_TAGS" | grep -c . || true)
+            RC_COUNT=$(echo "$RC_TAGS"  | grep -c . || true)
+            PROD_COUNT=$(echo "$PROD_TAGS" | grep -c . || true)
+
+            {
+              echo "## 📦 ${NAME}"
+              echo ""
+
+              echo "### DEV — \`${DEV_REPO}\` (${DEV_COUNT} tags)"
+              if [ -n "$DEV_TAGS" ]; then
+                echo '```'
+                echo "$DEV_TAGS"
+                echo '```'
+              else
+                echo "_No DEV tags found._"
+              fi
+              echo ""
+
+              echo "### RC — \`${UAT_REPO}\` (${RC_COUNT} tags)"
+              if [ -n "$RC_TAGS" ]; then
+                echo '```'
+                echo "$RC_TAGS"
+                echo '```'
+              else
+                echo "_No RC tags found._"
+              fi
+              echo ""
+
+              echo "### PROD — \`${UAT_REPO}\` (${PROD_COUNT} tags)"
+              if [ -n "$PROD_TAGS" ]; then
+                echo '```'
+                echo "$PROD_TAGS"
+                echo '```'
+              else
+                echo "_No PROD tags found._"
+              fi
+              echo ""
+              echo "---"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          done < <(echo "$MATRIX" | jq -c '.[]')

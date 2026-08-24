@@ -8,9 +8,9 @@ run-name: >-
 
 on:
   pull_request:
-    branches: [ "main", "integration" ]
+    branches: ["main", "integration"]
   push:
-    branches: [ "main", "integration" ]
+    branches: ["main", "integration"]
   workflow_call:
     secrets:
       SONAR_TOKEN:
@@ -25,13 +25,9 @@ permissions:
   contents: write
   pull-requests: write
 
-env:
-  PYTHON_VERSION: '3.11.4'
-  SONAR_VERSION: '4.6.2+2472'
-
 jobs:
   build:
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [self-hosted, Linux]
 
     steps:
       - uses: SGitHubActions/create-github-app-token@v1
@@ -51,7 +47,7 @@ jobs:
       - name: Install python ${{ vars.PYTHON_VERSION }}
         uses: SGitHubActions/setup-python@stable
         with:
-          python-version: '${{ vars.PYTHON_VERSION }}'
+          python-version: "${{ vars.PYTHON_VERSION }}"
           index-url: https://${{ vars.JFROG_USERNAME }}:${{ secrets.JFROG_PASSWORD }}@${{ vars.JFROG_URL }}${{ vars.KEAR_ID }}/simple
 
       - name: Install JF CLI
@@ -97,9 +93,105 @@ jobs:
         if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/integration')
         uses: SGitHubActions/sonar-scanner@v1
         with:
-          scanner-version: '${{ vars.SONAR_VERSION }}'
-          sonar-properties: 'sonar.properties'
+          scanner-version: "${{ vars.SONAR_VERSION }}"
+          sonar-properties: "sonar.properties"
           sonar-token: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Determine integration release-cycle bump
+        if: >
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/integration'
+        id: integration_bump
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_ENTERPRISE_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          export GH_HOST="${GITHUB_SERVER_URL#https://}"
+          gh auth status --hostname "$GH_HOST" || true
+
+          MERGE_SHA="${GITHUB_SHA}"
+          PR_JSON=$(gh api \
+            --hostname "$GH_HOST" \
+            "/repos/${GITHUB_REPOSITORY}/commits/${MERGE_SHA}/pulls" \
+            --jq '.[0] // empty')
+
+          if [ -z "$PR_JSON" ]; then
+            echo "No PR found for commit ${MERGE_SHA}; skipping version bump."
+            echo "should_bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          HEAD_REF=$(echo "$PR_JSON" | jq -r '.head.ref // ""')
+          LABELS=$(echo "$PR_JSON" | jq -r '.labels[].name // empty')
+
+          if [[ "$HEAD_REF" =~ ^hotfix([/-].*)?$ ]]; then
+            echo "Hotfix branch merged into integration; skipping bump here."
+            echo "should_bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if echo "$LABELS" | grep -q '^patch$'; then
+            echo "::error::The 'patch' label is reserved for hotfix releases only."
+            exit 1
+          fi
+
+          git fetch origin main integration
+
+          MAIN_VERSION=$(git show origin/main:pyproject.toml | sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p')
+          INTEGRATION_VERSION=$(git show origin/integration:pyproject.toml | sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p')
+
+          if [ "$MAIN_VERSION" != "$INTEGRATION_VERSION" ]; then
+            echo "Active release cycle detected (${INTEGRATION_VERSION}); skip bump."
+            echo "should_bump=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if echo "$LABELS" | grep -q '^major$'; then
+            BUMP="major"
+          else
+            BUMP="minor"
+          fi
+
+          echo "should_bump=true" >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+
+      - name: Bump integration version
+        if: >
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/integration' &&
+          steps.integration_bump.outputs.should_bump == 'true'
+        id: integration_version
+        run: |
+          set -euo pipefail
+          poetry version "${{ steps.integration_bump.outputs.bump }}"
+          NEW_VERSION=$(poetry version -s)
+          SRC_DIR=$(awk -F'=' '/^\s*src_directory\s*=/ {gsub(/^[ \t"]+|[ \t"]+$/,"",$2); gsub(/"/,"",$2); print $2}' pyproject.toml)
+          VERSION_FILE="${SRC_DIR}/__version__.py"
+          sed -i -E 's/^(__version__\s*=\s*")[^"]*(")/\1'"$NEW_VERSION"'\2/' "$VERSION_FILE"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Commit integration version bump
+        if: >
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/integration' &&
+          steps.integration_bump.outputs.should_bump == 'true'
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_APP_ID: ${{ vars.GH_APP_ID }}
+          GIT_REMOTE_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          git config user.name "${GH_APP_ID}[bot]"
+          git config user.email "${GH_APP_ID}+${GH_APP_ID}[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          SRC_DIR=$(awk -F'=' '/^\s*src_directory\s*=/ {gsub(/^[ \t"]+|[ \t"]+$/,"",$2); gsub(/"/,"",$2); print $2}' pyproject.toml)
+          git add "${SRC_DIR}/__version__.py"
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: start release cycle v${{ steps.integration_version.outputs.new_version }} [skip ci]"
+            git push "https://x-access-token:${APP_TOKEN}@${GIT_REMOTE_URL#https://}" HEAD:${{ github.ref_name }}
+          fi
 
       - name: Save merge SHA
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -121,25 +213,90 @@ jobs:
             --hostname "$GH_HOST" \
             "/repos/${GITHUB_REPOSITORY}/commits/${MERGE_SHA}/pulls" \
             --jq '.[0]')
-          HEAD_REF=$(echo "$PR_JSON" | jq -r '.head.ref')
-          LABELS=$(echo "$PR_JSON" | jq -r '.labels[].name // empty')
-          if echo "$LABELS" | grep -q '^major$'; then
-            BUMP="major"
-
-          elif echo "$LABELS" | grep -q '^minor$'; then
-            BUMP="minor"
-          elif echo "$LABELS" | grep -q '^patch$'; then
-            BUMP="patch"
-          else
+          if [ -z "$PR_JSON" ] || [ "$PR_JSON" = "null" ]; then
+            echo "No pull request metadata found for commit ${MERGE_SHA}; skipping release bump."
             echo "should_bump=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          HEAD_REF=$(echo "$PR_JSON" | jq -r '.head.ref')
+          LABELS=$(echo "$PR_JSON" | jq -r '.labels[].name // empty')
+
+          if [[ "$HEAD_REF" =~ ^hotfix([/-].*)?$ ]]; then
+            if echo "$LABELS" | grep -qE '^(major|minor)$'; then
+              echo "::error::Hotfix branches can only use 'patch'."
+              exit 1
+            fi
+            BUMP="patch"
+            IS_HOTFIX="true"
+          else
+            if echo "$LABELS" | grep -q '^patch$'; then
+              echo "::error::The 'patch' label is reserved for hotfix releases."
+              exit 1
+            fi
+
+            if echo "$LABELS" | grep -q '^major$'; then
+              BUMP="major"
+            else
+              BUMP="minor"
+            fi
+            IS_HOTFIX="false"
+          fi
+
+          echo "head_ref=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          echo "is_hotfix=$IS_HOTFIX" >> "$GITHUB_OUTPUT"
 
           echo "should_bump=true" >> "$GITHUB_OUTPUT"
           poetry version "$BUMP"
           RAW_VERSION=$(poetry version -s)
           echo "tag=v${RAW_VERSION}" >> "$GITHUB_OUTPUT"
-                              
+
+      - name: Auto-create hotfix PR to integration
+        if: >
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.get_tag.outputs.should_bump == 'true' &&
+          steps.get_tag.outputs.is_hotfix == 'true' &&
+          steps.get_tag.outputs.head_ref != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_ENTERPRISE_TOKEN: ${{ steps.app-token.outputs.token }}
+          HOTFIX_BRANCH: ${{ steps.get_tag.outputs.head_ref }}
+          RELEASE_TAG: ${{ steps.get_tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          export GH_HOST="${GITHUB_SERVER_URL#https://}"
+          gh auth status --hostname "$GH_HOST" || true
+
+          git fetch origin integration "$HOTFIX_BRANCH" --prune
+
+          AHEAD_COUNT=$(git rev-list --count "origin/integration..origin/${HOTFIX_BRANCH}")
+          if [ "$AHEAD_COUNT" -eq 0 ]; then
+            echo "Hotfix branch has no new commits vs integration; skip PR creation."
+            exit 0
+          fi
+
+          EXISTING_PR=$(gh pr list \
+            --hostname "$GH_HOST" \
+            --base integration \
+            --head "$HOTFIX_BRANCH" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "Hotfix PR already open: #${EXISTING_PR}"
+            exit 0
+          fi
+
+          gh pr create \
+            --hostname "$GH_HOST" \
+            --base integration \
+            --head "$HOTFIX_BRANCH" \
+            --title "chore(hotfix): merge ${HOTFIX_BRANCH} back to integration (${RELEASE_TAG})" \
+            --body "Automated PR to keep integration aligned after hotfix release ${RELEASE_TAG}."
+
       - name: Update __version__.py
         if: >
           github.event_name == 'push' &&
@@ -222,7 +379,10 @@ jobs:
           echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Github release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: >
+          github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          steps.get_tag.outputs.should_bump == 'true'
         id: tag_release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -231,6 +391,12 @@ jobs:
           RELEASE_BODY: ${{ steps.changelog.outputs.body }}
         run: |
           set -euo pipefail
+
+          export GH_HOST="${GITHUB_SERVER_URL#https://}"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; skipping."
+            exit 0
+          fi
 
           gh release create "$RELEASE_TAG" \
             --title "$RELEASE_TAG" \

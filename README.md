@@ -1,21 +1,20 @@
 # CI/CD
 
-- Patch  reserve for  hotfix 
-- Minor/Major reserve for normal release/normal branch: default minor
-- Auto pr from hotfix to intg 
-- Specfic tag from manual dev img build from specific branch: dev+branch_name push to DEV harbor
-
+- `patch` is reserved for hotfix releases.
+- `minor`/`major` are reserved for normal releases on normal branches; default is `minor`.
+- Automatically create a PR from the hotfix branch to `integration`.
+- Manual DEV image build from a specific branch uses tag `dev-<branch_name>` and pushes to DEV Harbor.
 
 ## Workflows
 
-| Workflow | Trigger | Purpose |
-|---|---|---|
-| **00 - List Available DEV/RC/PROD Builds** | Manual | List available DEV, RC and PROD builds |
-| **01 - CI** | Auto | CI checks, version handling, Git tag/release creation |
-| **02 - Build images** | Auto | Build application images |
-| **02b - Build Poetry Base Image** | Auto | Build Poetry base image |
-| **03 - Prepare Release** | Manual | Prepare RC images and create release PR |
-| **04 - Release images to PROD** | Manual | Release/promote images to PROD |
+| Workflow                                   | Trigger | Purpose                                               |
+| ------------------------------------------ | ------- | ----------------------------------------------------- |
+| **00 - List Available DEV/RC/PROD Builds** | Manual  | List available DEV, RC, and PROD builds               |
+| **01 - CI**                                | Auto    | CI checks, version handling, Git tag/release creation |
+| **02 - Build images**                      | Auto    | Build application images                              |
+| **02b - Build Poetry Base Image**          | Auto    | Build Poetry base image                               |
+| **03 - Prepare Release**                   | Manual  | Prepare RC images and create release PR               |
+| **04 - Release images to PROD**            | Manual  | Release/promote images to PROD                        |
 
 > **Note:** Each workflow supports manual triggering (`workflow_dispatch`).  
 > The **Auto** and **Manual** labels above describe the normal release-cycle usage.
@@ -24,39 +23,7 @@
 
 ## Version Management
 
-The version is determined from the **PR label**.
-
-### Version Priority
-
-```text
-major > minor > patch
-```
-
-### Version Calculation
-
-```text
-If no active release cycle:
-    Start new cycle with calculated version.
-
-If active release cycle exists:
-    Compare active cycle version vs incoming version.
-
-    If incoming version has higher priority:
-        Upgrade active cycle version.
-
-    Else:
-        Keep active cycle version.
-```
-
-### Example
-
-```text
-Current release cycle = patch 3.3.4
-Incoming PR           = minor 3.4.0
-
-Result:
-3.3.4 → 3.4.0
-```
+The version is determined by the **PR label**.
 
 ---
 
@@ -65,8 +32,8 @@ Result:
 ## No Active Release Cycle
 
 ```text
-main        = 3.3.2
-integration = 3.3.2
+main        = 3.4.0
+integration = 3.4.0
 ```
 
 Meaning:
@@ -87,7 +54,7 @@ Start new release cycle
 Apply version bump
         │
         ▼
-integration = 3.3.3
+integration = 3.5.0
 ```
 
 ## Active Release Cycle
@@ -95,14 +62,14 @@ integration = 3.3.3
 After the first PR starts the release cycle:
 
 ```text
-main        = 3.3.2
-integration = 3.3.3
+main        = 3.4.0
+integration = 3.5.0
 ```
 
 Meaning:
 
 ```text
-Active release cycle = 3.3.3
+Active release cycle = 3.5.0
 ```
 
 CI detects:
@@ -125,7 +92,7 @@ No version bump for the release cycle
 
 ```mermaid
 gitGraph
-    commit id: "3.3.2"
+    commit id: "3.4.0"
 
     branch integration
     checkout integration
@@ -136,7 +103,7 @@ gitGraph
     checkout integration
     merge work1 id: "PR #1 - patch"
 
-    commit id: "CI: 3.3.3"
+    commit id: "CI: 3.5.0"
 
     branch work2
     checkout work2
@@ -152,7 +119,7 @@ gitGraph
 
     checkout main
     merge integration id: "Release PR → main"
-    commit id: "3.3.3 - Git tag + Release"
+    commit id: "3.5.0 - Git tag + Release"
 ```
 
 ## Flow
@@ -165,13 +132,13 @@ work1, work2, work3
   │
   │ PR to integration
   │
-  │ Default PR label: patch
+  │ Default PR label: Minor
   │
   ▼
 01 CI
+Auto trigger
   │
-  └── Auto trigger
-      └── Only check code
+  └── Run code checks only
   │
   ▼
 ==================== INTEGRATION BRANCH ====================
@@ -179,6 +146,7 @@ work1, work2, work3
   │ PR merged to integration
   ▼
 01 CI
+Auto trigger
   │
   ├── Detect release cycle
   ├── Bump version
@@ -189,13 +157,14 @@ work1, work2, work3
   │
   ▼
 02 Build images
+Auto trigger
   │
-  ├── Auto trigger
-  ├── Build image
+  ├── Build images
   ├── Tag image:
   │     ├── dev
-  │     ├── dev + intg 
-  │     
+  │     ├── dev-sha
+  │     ├── dev-intg
+  │
   │
   └── Push to Harbor DEV repository
   │
@@ -212,11 +181,11 @@ work1, work2, work3
                      │
                      ▼
               03 Prepare Release
+              Auto trigger
                      │
-                     ├── Auto trigger
                      ├── Retag images as RC
                      │     Example:
-                     │     3.3.3.rcN
+                     │     3.5.0-rcN
                      │
                      ├── Push RC images
                      │     to Harbor UAT repository
@@ -234,8 +203,8 @@ work1, work2, work3
                      │ PR merged to main
                      ▼
                     01 CI
+                    Auto trigger
                      │
-                     ├── Auto trigger
                      ├── Create Git tag
                      ├── Create GitHub Release
                      └── Update changelog
@@ -245,12 +214,12 @@ work1, work2, work3
                      │
                      ▼
               04 Release images to PROD
+              Auto trigger
                      │
-                     ├── Manual trigger
                      ├── Retag images to release version:
-                     │     ├── 3.3.3
-                     │     ├── 3.3.3-sha
-                     │     └── 3.3.3-sha-date
+                     │     ├── 3.5.0
+                     │     ├── 3.5.0-sha
+                     │     └── 3.5.0-sha-date
                      │
                      └── Push to Harbor UAT/PROD repository
                      │
@@ -260,7 +229,7 @@ work1, work2, work3
 
 ---
 
-# HOT FIX / QUICK RELEASE
+# HOTFIX / QUICK RELEASE
 
 ## Git Graph
 
@@ -292,9 +261,9 @@ PR to main
   │
   ▼
 01 CI
+Auto trigger
   │
-  └── Auto trigger
-      └── Only check code
+  └── Run code checks only
   │
   ▼
 PR merged to main
@@ -304,10 +273,10 @@ PR merged to main
   │
   ▼
 01 CI
+Auto trigger
   │
-  ├── Auto trigger
   ├── Bump version for hotfix
-  │     └── Patch
+  │     └── patch
   ├── Update version files
   ├── Create Git tag
   └── Create GitHub Release
@@ -317,18 +286,20 @@ PR merged to main
   │
   ▼
 02 Build images
+Manual trigger
   │
-  ├── Manual trigger
   ├── Input tag
   └── Build image from that Hotfix tag
+    ├── Tag image:
+  │     ├── dev+branchname
   │
   ▼
 02 done
   │
   ▼
 04 Release images to PROD
+Manual trigger
   │
-  ├── Manual trigger
   ├── Retag image to release version:
   │     ├── 3.3.3
   │     ├── 3.3.3-sha
@@ -336,172 +307,9 @@ PR merged to main
   │
   └── Push to Harbor UAT/PROD repository
   │
+  ├── Auto pr to intg branch
   ▼
 FINISH HOTFIX RELEASE
 ```
 
 ---
-
-# Scenario: Hotfix During Active Patch Release
-
-## Current State
-
-```text
-main        = 3.3.3
-integration = 3.3.4
-```
-
-Therefore:
-
-```text
-Release cycle 3.3.4 is already active.
-```
-
-## Git Graph
-
-```mermaid
-gitGraph
-    commit id: "3.3.3"
-
-    branch integration
-    checkout integration
-    commit id: "Release cycle 3.3.4"
-
-    checkout main
-    branch hotfix
-    checkout hotfix
-    commit id: "Production hotfix"
-
-    checkout main
-    merge hotfix id: "Hotfix PR"
-    commit id: "3.3.4 - Hotfix release"
-
-    checkout integration
-    merge main id: "Hotfix back-merge"
-    commit id: "main = integration = 3.3.4"
-
-    commit id: "Start next cycle: 3.3.5"
-```
-
-## Flow
-
-```text
-                    ACTIVE RELEASE CYCLE
-                    ====================
-
-main        = 3.3.3
-integration = 3.3.4
-                 │
-                 └── Active release = 3.3.4
-                              │
-                              │
-                         Production
-                           hotfix
-                              │
-                              ▼
-                         HOTFIX BRANCH
-                              │
-                              ▼
-                           PR → main
-                              │
-                              ▼
-                       HOTFIX RELEASE
-                              │
-                              ▼
-                         main = 3.3.4
-                              │
-                              │
-                              │ hotfix back-merge
-                              ▼
-                     integration = 3.3.4
-                              │
-                              ▼
-                  main == integration
-                              │
-                              ▼
-                   Active cycle completed
-                              │
-                              ▼
-                 Automatically start next
-                     patch release cycle
-                              │
-                              ▼
-                    integration = 3.3.5
-```
-
-## Result
-
-Before hotfix:
-
-```text
-main        = 3.3.3
-integration = 3.3.4
-```
-
-After hotfix and hotfix back-merge:
-
-```text
-main        = 3.3.4
-integration = 3.3.4
-```
-
-To avoid image tag conflicts, the active release cycle is automatically moved to the next patch version:
-
-```text
-main        = 3.3.4
-integration = 3.3.5
-```
-
-Therefore:
-
-```text
-3.3.4 = completed hotfix/release
-3.3.5 = new active release cycle
-```
-
----
-
-# Overall Version / Branch State
-
-```text
-                    ┌──────────────────────────┐
-                    │ main == integration      │
-                    │        3.3.2             │
-                    └────────────┬─────────────┘
-                                 │
-                                 │ CI detects
-                                 │ no active cycle
-                                 ▼
-                    ┌──────────────────────────┐
-                    │ Start release cycle      │
-                    │ integration = 3.3.3      │
-                    └────────────┬─────────────┘
-                                 │
-                                 ▼
-                    ┌──────────────────────────┐
-                    │ Active release cycle     │
-                    │ main = 3.3.2             │
-                    │ intg = 3.3.3              │
-                    └────────────┬─────────────┘
-                                 │
-                     Incoming PR labels
-                                 │
-                ┌────────────────┼────────────────┐
-                ▼                ▼                ▼
-              patch            minor            major
-                │                │                │
-                ▼                ▼                ▼
-             keep            upgrade            upgrade
-             cycle          cycle version      cycle version
-                │                │                │
-                └────────────────┼────────────────┘
-                                 │
-                                 ▼
-                           Release → main
-                                 │
-                                 ▼
-                         main = integration
-                                 │
-                                 ▼
-                         Cycle completed
-```

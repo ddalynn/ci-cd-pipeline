@@ -1,19 +1,23 @@
-name: 03 - Prepare Release (Manual)
-run-name: "Prepare Release | ${{ inputs.bump_type }} | ${{ inputs.source_sha }} → RC"
+name: 03 - Prepare Release
+run-name: >-
+  ${{
+    github.event_name == 'workflow_run' &&
+    format('Prepare Release | auto | {0} → RC', github.event.workflow_run.head_sha) ||
+    format('Prepare Release | manual | {0} → RC', inputs.source_sha)
+  }}
 
 on:
+  workflow_run:
+    workflows: ["02 - Build images (Auto)"]
+    types: [completed]
+    branches: [integration]
+
   workflow_dispatch:
     inputs:
       source_sha:
-        description: "Run from a non-main branch. Enter a DEV tag (dev-8e7be55) "
+        description: "Run from a non-main branch. Enter a DEV tag: dev-<sha>, dev-<branch>, dev-intg"
         required: true
         type: string
-      bump_type:
-        description: "Version bump for RC: major | minor | patch"
-        required: false
-        default: "patch"
-        type: choice
-        options: [major, minor, patch]
 
 concurrency:
   group: promote-rc-uat
@@ -21,14 +25,18 @@ concurrency:
 
 jobs:
   prepare-rc:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success'
+      )
     runs-on: [self-hosted, Linux]
     outputs:
       rc_version: ${{ steps.compute.outputs.rc_version }}
       effective_source_tag: ${{ steps.compute.outputs.effective_source_tag }}
       source_sha: ${{ steps.compute.outputs.source_sha }}
-      new_cycle: ${{ steps.cycle.outputs.new_cycle }}
-      main_version: ${{ steps.cycle.outputs.main_version }}
-      integration_version: ${{ steps.cycle.outputs.integration_version }}
+      input_source_tag: ${{ steps.source.outputs.source_tag }}
       matrix: ${{ steps.matrix.outputs.matrix }}
     env:
       HARBOR_URL: ${{ vars.HARBOR_URL }}
@@ -36,11 +44,31 @@ jobs:
       DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
 
     steps:
-      - name: Validate source_sha format
+      - name: Resolve source tag
+        id: source
         run: |
           set -euo pipefail
-          SOURCE_TAG="${{ inputs.source_sha }}"
-          if ! [[ "$SOURCE_TAG" =~ ^(dev-[a-f0-9]{7,}|[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            SHORT_SHA="$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)"
+            SOURCE_TAG="dev-${SHORT_SHA}"
+          else
+            SOURCE_TAG="${{ inputs.source_sha }}"
+          fi
+
+          SOURCE_TAG="$(echo -n "$SOURCE_TAG" | xargs)"
+          if [ -z "$SOURCE_TAG" ]; then
+            echo "::error::source_sha is required for manual trigger."
+            exit 1
+          fi
+
+          echo "source_tag=$SOURCE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Validate input format
+        run: |
+          set -euo pipefail
+          SOURCE_TAG="${{ steps.source.outputs.source_tag }}"
+          if ! [[ "$SOURCE_TAG" =~ ^(dev([a-z0-9._-].*)?|[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
             echo "::error::Invalid source_sha '$SOURCE_TAG'"
             {
               echo "## Input Validation Failed"
@@ -58,120 +86,10 @@ jobs:
             exit 1
           fi
 
-      - uses: SGitHubActions/create-github-app-token@v1
-        id: app-token
-        with:
-          app-id: ${{ vars.GH_APP_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install python ${{ vars.PYTHON_VERSION }}
-        uses: SGitHubActions/setup-python@stable
-        with:
-          python-version: '${{ vars.PYTHON_VERSION }}'
-          index-url: https://${{ vars.JFROG_USERNAME }}:${{ secrets.JFROG_PASSWORD }}@${{ vars.JFROG_URL }}${{ vars.KEAR_ID }}/simple
-      - name: Debug Python & Poetry
-        run: |
-          python --version
-          pip --version
-          which poetry || true
-          poetry --version || true
-
-      - name: Install JF CLI
-        uses: SGitHubActions/setup-jfrog-cli@v4
-        env:
-          JF_URL: ${{ vars.JFROG_BASE_URL }}
-          JF_ACCESS_TOKEN: ${{ secrets.JFROG_PASSWORD }}
-          JF_USER: ${{ vars.JFROG_USERNAME }}
-          JF_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
-        with:
-          disable-auto-build-publish: true
-          download-repository: jfrog-cli-remote
-
-      - name: Configure pip and install Poetry
-        run: |
-          jf pip-config --repo-resolve ${{ vars.JFROG_REPO_PYPI }}
-          pip install --upgrade pip
-          pip install poetry    
-
-      - name: Determine release cycle
-        id: cycle
-        run: |
-          set -euo pipefail
-
-          git fetch origin main integration
-
-          MAIN_VERSION=$(git show origin/main:pyproject.toml \
-            | grep '^version' \
-            | sed -E 's/.*"(.*)"/\1/')
-
-          INTEGRATION_VERSION=$(grep '^version' pyproject.toml \
-            | sed -E 's/.*"(.*)"/\1/')
-
-          echo "main_version=$MAIN_VERSION" >> $GITHUB_OUTPUT
-          echo "integration_version=$INTEGRATION_VERSION" >> $GITHUB_OUTPUT
-
-          if [ "$MAIN_VERSION" = "$INTEGRATION_VERSION" ]; then
-            echo "new_cycle=true" >> $GITHUB_OUTPUT
-          else
-            echo "new_cycle=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Bump version for new cycle
-        if: steps.cycle.outputs.new_cycle == 'true'
-        id: bump
-        run: |
-          set -euo pipefail
-
-          poetry version "${{ inputs.bump_type }}"
-
-          NEW_VERSION=$(poetry version -s)
-
-          SRC_DIR=$(awk -F= '/src_directory/ {
-            gsub(/"/,"",$2)
-            gsub(/ /,"",$2)
-            print $2
-          }' pyproject.toml)
-
-          sed -i -E \
-            's/^(__version__ = ")[^"]+(")/\1'"${NEW_VERSION}"'\2/' \
-            "${SRC_DIR}/__version__.py"
-
-          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "rc_version=$NEW_VERSION-rc1" >> $GITHUB_OUTPUT
-
-      - name: Commit release version
-        if: steps.cycle.outputs.new_cycle == 'true'
-        id: commit_version
-        env:
-          APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_APP_ID: ${{ vars.GH_APP_ID }}
-          GIT_REMOTE_URL: ${{ github.server_url }}/${{ github.repository }}.git
-        run: |
-          git config user.name "${GH_APP_ID}[bot]"
-          git config user.email "${GH_APP_ID}+${GH_APP_ID}[bot]@users.noreply.github.com"
-          git add pyproject.toml
-          SRC_DIR=$(grep 'src_directory' pyproject.toml | sed 's/src_directory = "//;s/"//')
-          git add "${SRC_DIR}/__version__.py"
-          if ! git diff --staged --quiet; then
-            git commit -m "chore: prepare release ${{ steps.bump.outputs.version }} [skip ci]"
-            git push "https://x-access-token:${APP_TOKEN}@${GIT_REMOTE_URL#https://}" HEAD:${GITHUB_REF_NAME}          
-
-          fi
-          echo "new_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-             
-      - name: Resolve new DEV image tag
-        if: steps.cycle.outputs.new_cycle == 'true'
-        id: new_dev_tag
-        run: |
-          set -euo pipefail
-          NEW_SHA="${{ steps.commit_version.outputs.new_sha }}"
-          echo "new_dev_tag=dev-${NEW_SHA}" >> "$GITHUB_OUTPUT"
-          echo "New DEV image tag after version bump: dev-${NEW_SHA}"
-    
       - name: Read matrix.json
         id: matrix
         run: |
@@ -181,81 +99,98 @@ jobs:
       - name: Compute RC version
         id: compute
         run: |
-            set -euo pipefail
+          set -euo pipefail
 
-            NEW_CYCLE="${{ steps.cycle.outputs.new_cycle }}"
-            if [ "$NEW_CYCLE" = "true" ]; then
-              SOURCE_TAG="${{ steps.new_dev_tag.outputs.new_dev_tag }}"
-              echo "New release cycle: using newly built DEV image: ${SOURCE_TAG}"
-            else
-              SOURCE_TAG="${{ inputs.source_sha }}"
-              echo "Ongoing release cycle: using supplied DEV image: ${SOURCE_TAG}"
-            fi
+          SOURCE_TAG="${{ steps.source.outputs.source_tag }}"
+          echo "Source tag: ${SOURCE_TAG}"
 
-            BASE_VERSION=$(grep -E '^\s*version\s*=' pyproject.toml \
-              | head -1 \
-              | sed -E 's/.*=\s*"([^"]+)".*/\1/')
+          BASE_VERSION=$(grep -E '^\s*version\s*=' pyproject.toml \
+            | head -1 \
+            | sed -E 's/.*=\s*"([^"]+)".*/\1/')
 
-            if [ -z "$BASE_VERSION" ]; then
-              echo "::error::Could not read version from pyproject.toml"
-              exit 1
-            fi
+          if [ -z "$BASE_VERSION" ]; then
+            echo "::error::Could not read version from pyproject.toml"
+            exit 1
+          fi
 
-            TARGET_VERSION="$BASE_VERSION"
+          TARGET_VERSION="$BASE_VERSION"
 
-            echo "Base version   : $BASE_VERSION"
-            echo "Target version : $TARGET_VERSION"
-            echo "Source tag     : $SOURCE_TAG"
+          echo "Base version   : $BASE_VERSION"
+          echo "Target version : $TARGET_VERSION"
+          echo "Source tag     : $SOURCE_TAG"
 
-            if [[ "$SOURCE_TAG" =~ ^dev-([a-f0-9]{7,})$ ]]; then
-              SOURCE_SHA="${BASH_REMATCH[1]}"
-            else
-              echo "::error::Could not determine source SHA from $SOURCE_TAG"
-              exit 1
-            fi
-            echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
-
+          # Try direct extraction first for tags that already contain sha, e.g.
+          # dev-abc1234 or dev-feature-abc1234-20260101-120000
+          if [[ "$SOURCE_TAG" =~ ([a-f0-9]{7,})(-[0-9]{8}-[0-9]{6})?$ ]]; then
+            SOURCE_SHA="${BASH_REMATCH[1]}"
+          elif [[ "$SOURCE_TAG" =~ ^dev([a-z0-9._-].*)?$ ]]; then
             SRC_REPO=$(jq -r '.[0].tag' .github/workflows/matrix.json)
-            DST_REPO=$(jq -r '.[0].uat_tag' .github/workflows/matrix.json)
 
+            ALL_SRC_TAGS=$(curl -s \
+              -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
+              "https://${HARBOR_URL}/v2/${SRC_REPO}/tags/list" \
+              | jq -r '.tags[]?' || true)
+
+            # Resolve SHA from sibling tags, preferring timestamped variants first.
+            SOURCE_SHA=$(echo "$ALL_SRC_TAGS" \
+              | awk -v t="$SOURCE_TAG" '
+                index($0, t "-") == 1 {
+                  rest = substr($0, length(t) + 2)
+                  if (rest ~ /^[a-f0-9]{7,}-[0-9]{8}-[0-9]{6}$/) {
+                    split(rest, a, "-")
+                    print a[1] "|2"
+                  } else if (rest ~ /^[a-f0-9]{7,}$/) {
+                    print rest "|1"
+                  }
+                }
+              ' \
+              | sort -t'|' -k2,2nr \
+              | head -1 \
+              | cut -d'|' -f1)
+
+            if [ -z "$SOURCE_SHA" ]; then
+              echo "::error::Could not resolve source SHA from Harbor tags for $SOURCE_TAG."
+              exit 1
+            fi
+          else
+            echo "::error::Could not determine source SHA from $SOURCE_TAG"
+            exit 1
+          fi
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+          # Check all UAT repos and take the highest rcN to keep numbering consistent across components
+          LAST_RC=0
+          while IFS= read -r DST_REPO; do
             ALL_DST_TAGS=$(curl -s \
               -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
               "https://${HARBOR_URL}/v2/${DST_REPO}/tags/list" \
               | jq -r '.tags[]?' || true)
-
-            RC_NUMBERS=$(echo "$ALL_DST_TAGS" \
+            COMP_MAX=$(echo "$ALL_DST_TAGS" \
               | grep -E "^${TARGET_VERSION}-rc[0-9]+$" \
               | sed -E "s/^${TARGET_VERSION}-rc([0-9]+)$/\1/" \
-              | sort -n || true)
-            LAST_RC=$(echo "$RC_NUMBERS" | tail -1)
-
-            if [ -z "$LAST_RC" ]; then
-              NEXT_RC=1
-            else
-              NEXT_RC=$((LAST_RC + 1))
+              | sort -n \
+              | tail -1)
+            if [ -n "$COMP_MAX" ] && [ "$COMP_MAX" -gt "$LAST_RC" ]; then
+              LAST_RC="$COMP_MAX"
             fi
+          done < <(jq -r '.[].uat_tag' .github/workflows/matrix.json)
 
-            RC_VERSION="${TARGET_VERSION}-rc${NEXT_RC}"
-            echo "rc_version=${RC_VERSION}" >> "$GITHUB_OUTPUT"
-            echo "effective_source_tag=${SOURCE_TAG}" >> "$GITHUB_OUTPUT"
-            echo "Computed RC version    : ${RC_VERSION}"
-            echo "Effective source tag   : ${SOURCE_TAG}"
+          if [ "$LAST_RC" -eq 0 ]; then
+            NEXT_RC=1
+          else
+            NEXT_RC=$((LAST_RC + 1))
+          fi
 
-  build-images:
-    needs: prepare-rc
-    if: needs.prepare-rc.outputs.new_cycle == 'true'
-    uses: ./.github/workflows/cd-all-images-build.yml
-    secrets: inherit
+          RC_VERSION="${TARGET_VERSION}-rc${NEXT_RC}"
+          echo "rc_version=${RC_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "effective_source_tag=${SOURCE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "Computed RC version    : ${RC_VERSION}"
+          echo "Effective source tag   : ${SOURCE_TAG}"
 
   promote-image-tags:
-    if: |
-      always() &&
-      (
-        needs.build-images.result == 'success' ||
-        needs.build-images.result == 'skipped'
-      )
+    if: needs.prepare-rc.result == 'success'
     name: promote ${{ matrix.component.name }}
-    needs: [ prepare-rc, build-images]
+    needs: [prepare-rc]
     runs-on: [self-hosted, Linux]
 
     strategy:
@@ -277,23 +212,22 @@ jobs:
           echo "$DOCKER_PASSWORD" | docker login "$HARBOR_URL" -u "$DOCKER_USER" --password-stdin
 
       - name: Wait for image availability
-        if: needs.prepare-rc.outputs.new_cycle == 'true'
         run: |
           set -euo pipefail
 
           SRC_IMAGE="${HARBOR_URL}/${{ matrix.component.tag }}:${{ needs.prepare-rc.outputs.effective_source_tag }}"
           echo "Waiting for image to become available: $SRC_IMAGE"
-          for i in {1..20}; do
+          for i in {1..40}; do
             if docker manifest inspect "$SRC_IMAGE" >/dev/null 2>&1; then
               echo "Image is available."
               exit 0
             fi
-            echo "Attempt $i/20 - image not ready yet..."
+            echo "Attempt $i/40 - image not ready yet..."
             sleep 15
           done
           echo "::error::Image never became available: $SRC_IMAGE"
-          exit 1    
-                         
+          exit 1
+
       - name: Retag DEV image as RC in UAT registry
         id: promote-rc
         run: |
@@ -326,8 +260,35 @@ jobs:
 
           echo "Successfully promoted ${{ matrix.component.uat_tag }}:${EFFECTIVE_SOURCE} → ${{ matrix.component.uat_tag }}:${RC_VERSION}"
 
+      - name: Wait for Harbor scan (RC plain)
+        uses: SGitHubActions/wait-harbor-scan@develop
+        env:
+          HARBOR_USERNAME: ${{ vars.DOCKER_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        with:
+          registry: ${{ vars.HARBOR_URL }}
+          namespace: ${{ vars.HARBOR_NAMESPACE }}
+          repository: ${{ matrix.component.uat_tag }}
+          tag: ${{ needs.prepare-rc.outputs.rc_version }}
+          max-retries: 60
+          sleep-time: 10
+
+      - name: Wait for Harbor scan (RC with SHA)
+        uses: SGitHubActions/wait-harbor-scan@develop
+        env:
+          HARBOR_USERNAME: ${{ vars.DOCKER_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        with:
+          registry: ${{ vars.HARBOR_URL }}
+          namespace: ${{ vars.HARBOR_NAMESPACE }}
+          repository: ${{ matrix.component.uat_tag }}
+          tag: ${{ needs.prepare-rc.outputs.rc_version }}-${{ needs.prepare-rc.outputs.source_sha }}
+          max-retries: 60
+          sleep-time: 10
+
   create-pr-to-main:
     needs:
+      - prepare-rc
       - promote-image-tags
     if: success()
     runs-on: [self-hosted, Linux]
@@ -495,7 +456,7 @@ jobs:
 
           Please review and update the Release Notes section before merging to production.
           > Release Notes section will be used for the GitHub Release Notes when this PR is merged into main.
-          
+
           ---
 
           ## Description
@@ -578,38 +539,22 @@ jobs:
       - promote-image-tags
     runs-on: [self-hosted, Linux]
     steps:
-    - name: Publish summary
-      run: |
-        {
-          echo "# Release Preparation Summary"
-          echo ""
+      - name: Publish summary
+        run: |
+          {
+            echo "# Release Preparation Summary"
+            echo ""
 
-          echo "## Release Cycle"
-          echo "- Branch: ${GITHUB_REF_NAME}"
-          echo "- New Cycle: ${{ needs.prepare-rc.outputs.new_cycle }}"
-          echo ""
+            echo "## Versions"
+            echo "- RC Version: ${{ needs.prepare-rc.outputs.rc_version }}"
+            echo ""
 
-          echo "## Versions"
-          echo "- Main Version: ${{ needs.prepare-rc.outputs.main_version }}"
-          echo "- Integration Version: ${{ needs.prepare-rc.outputs.integration_version }}"
-          echo "- RC Version: ${{ needs.prepare-rc.outputs.rc_version }}"
-          echo ""
+            echo "## Image Promotion"
+            echo "- Input DEV Tag: ${{ needs.prepare-rc.outputs.input_source_tag }}"
+            echo "- Effective DEV Tag: ${{ needs.prepare-rc.outputs.effective_source_tag }}"
+            echo "- Target RC Tag: ${{ needs.prepare-rc.outputs.rc_version }}"
+            echo ""
 
-          echo "## Image Promotion"
-          echo "- Input DEV Tag: ${{ inputs.source_sha }}"
-          echo "- Effective DEV Tag: ${{ needs.prepare-rc.outputs.effective_source_tag }}"
-          echo "- Target RC Tag: ${{ needs.prepare-rc.outputs.rc_version }}"
-          echo ""
-
-          if [ "${{ needs.prepare-rc.outputs.new_cycle }}" = "true" ]; then
             echo "## Actions Performed"
-            echo "- ✅ Version bumped"
-            echo "- ✅ New DEV image rebuilt"
             echo "- ✅ DEV image promoted to RC"
-          else
-            echo "## Actions Performed"
-            echo "- ✅ Existing DEV image promoted"
-            echo "- ⏭ Version bump skipped"
-            echo "- ⏭ Image rebuild skipped"
-          fi
-        } >> "$GITHUB_STEP_SUMMARY"
+          } >> "$GITHUB_STEP_SUMMARY"

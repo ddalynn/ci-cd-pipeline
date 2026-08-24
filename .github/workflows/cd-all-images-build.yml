@@ -1,39 +1,36 @@
-
 name: 02 - Build images (Auto)
 run-name: >-
   ${{ 
     inputs.release_name &&
     format('Building images: {0}', inputs.release_name) ||
+    (github.event_name == 'workflow_dispatch' && format('Building images: dev-{0}', github.ref_name)) ||
     format('Building images: dev-{0}', github.event.workflow_run.head_sha || github.sha)
   }}
 on:
   workflow_call:
-    
+
   workflow_run:
     workflows: ["01 - CI (Auto)"]
     types: [completed]
     branches:
-          - integration
+      - integration
 
   workflow_dispatch:
     inputs:
       release_name:
-        description: 'Git tag or branch to build (e.g. v3.3.4). Leave empty to build a DEV image from the selected branch.'
+        description: "Git tag or branch to build (e.g. v3.3.4). Leave empty to build a DEV image from the selected branch."
         type: string
         required: false
       rebuild_poetry:
-        description: 'Rebuild Docker image with Poetry'
+        description: "Rebuild Docker image with Poetry"
         required: true
         type: boolean
         default: false
       clean_poetry_cache:
-        description: 'Clean Poetry virtualenv and cache before install'
+        description: "Clean Poetry virtualenv and cache before install"
         required: true
         type: boolean
         default: true
-
-env:
-  RELEASE_VERSION: ${{ github.event.workflow_run.outputs.app_version || github.event.inputs.release_name || '' }}
 
 jobs:
   build-poetry-base:
@@ -71,12 +68,9 @@ jobs:
       (
         github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success' &&
-        (
-          github.event.workflow_run.head_branch == 'integration' ||
-          github.event.workflow_run.head_branch == 'main'
-        )
+        github.event.workflow_run.head_branch == 'integration'
       )
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [self-hosted, Linux]
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -101,9 +95,10 @@ jobs:
       )
     runs-on: [self-hosted, Linux]
     outputs:
-      version: ${{ steps.generate_metadata.outputs.version }}
+      primary_tag: ${{ steps.generate_metadata.outputs.primary_tag }}
       hash: ${{ steps.generate_metadata.outputs.hash }}
       date: ${{ steps.generate_metadata.outputs.date }}
+      channel_or_fallback: ${{ steps.generate_metadata.outputs.channel_or_fallback }}
 
     steps:
       - name: Checkout code
@@ -124,20 +119,44 @@ jobs:
           date=$(date +"%Y%m%d-%H%M%S")
           REL="${{ github.event.inputs.release_name || '' }}"
           REL="$(echo -n "$REL" | xargs)"
-          if [ -z "$REL" ]; then
-            git fetch --tags --force
-            REL="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
-          fi
-          echo "Detected REL='$REL'"
-          if [[ "$REL" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            version="${REL#v}"
+
+          primary_tag=""
+          channel_or_fallback=""
+
+          if [ "${{ github.event_name }}" = "workflow_run" ] && [ "${{ github.event.workflow_run.head_branch || '' }}" = "integration" ]; then
+            primary_tag="dev"
+            channel_or_fallback="dev-intg"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -z "$REL" ]; then
+            branch_name="${{ github.ref_name }}"
+            safe_branch=$(echo "$branch_name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')
+            primary_tag="dev-${safe_branch}"
           else
-            version="dev"
+            if [ -z "$REL" ]; then
+              git fetch --tags --force
+              REL="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+            fi
+
+            if [[ "$REL" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              primary_tag="${REL#v}"
+            elif [[ "$REL" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              primary_tag="$REL"
+            elif [ -n "$REL" ]; then
+              safe_ref=$(echo "$REL" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')
+              primary_tag="dev-${safe_ref}"
+            else
+              primary_tag="dev"
+            fi
           fi
-          echo "version=$version" >> $GITHUB_OUTPUT
+
+          if [ -z "$channel_or_fallback" ]; then
+            channel_or_fallback="${primary_tag}-${hash}-${date}"
+          fi
+
+          echo "primary_tag=$primary_tag" >> $GITHUB_OUTPUT
           echo "hash=$hash" >> $GITHUB_OUTPUT
           echo "date=$date" >> $GITHUB_OUTPUT
-          
+          echo "channel_or_fallback=$channel_or_fallback" >> $GITHUB_OUTPUT
+
   build:
     if: >
       always() &&
@@ -157,7 +176,7 @@ jobs:
       needs.generate-metadata.result == 'success'
 
     needs: [build-poetry-base, matrix-builder, generate-metadata]
-    runs-on: [ self-hosted, Linux ]
+    runs-on: [self-hosted, Linux]
 
     strategy:
       fail-fast: false
@@ -176,7 +195,7 @@ jobs:
       - name: Install Python ${{ vars.PYTHON_VERSION }}
         uses: SGitHubActions/setup-python@stable
         with:
-          python-version: '${{ vars.PYTHON_VERSION }}'
+          python-version: "${{ vars.PYTHON_VERSION }}"
           index-url: https://${{ vars.JFROG_USERNAME }}:${{ secrets.JFROG_PASSWORD }}@${{ vars.JFROG_URL }}${{ vars.KEAR_ID }}/simple
 
       - name: Setup JFrog CLI
@@ -195,9 +214,9 @@ jobs:
           poetry source add --priority=primary myjfrog ${{ vars.JFROG_BASE_URL }}/artifactory/api/pypi/${{ vars.JFROG_REPO_PYPI }}/simple;
           poetry config http-basic.myjfrog ${{ secrets.JFROG_USERNAME }} ${{ secrets.JFROG_PASSWORD }};
           cp /home/runner/.config/pip/pip.conf ./;
-          chmod 777 ./pip.conf;
+          chmod 600 ./pip.conf;
           cp /home/runner/.config/pypoetry/auth.toml ./;
-          chmod 777 ./auth.toml;
+          chmod 600 ./auth.toml;
 
       - name: Build and Push Docker images
         uses: SGitHubActions/build-push-action@v3
@@ -208,9 +227,9 @@ jobs:
         with:
           registry: ${{ vars.HARBOR_URL }}
           tags: |
-            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.version }}
-            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.version }}-${{ needs.generate-metadata.outputs.hash }}
-            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.version }}-${{ needs.generate-metadata.outputs.hash }}-${{ needs.generate-metadata.outputs.date }}
+            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.primary_tag }}
+            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.primary_tag }}-${{ needs.generate-metadata.outputs.hash }}
+            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.channel_or_fallback }}
           file: ${{ matrix.component.dockerfile }}
           push: true
           username: ${{ vars.DOCKER_USERNAME }}

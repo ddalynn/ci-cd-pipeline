@@ -2,16 +2,12 @@ name: 04 - Release images to PROD (Manual)
 run-name: "Release | ${{ inputs.rc_tag }} → PROD"
 
 on:
-    workflow_dispatch:
-      inputs:
-        rc_tag:
-          description: "RC: 3.3.5-rc1 | Hotfix / Release: 3.3.5"
-          type: string
-          required: true
-
-permissions:
-  contents: write
-  pull-requests: write
+  workflow_dispatch:
+    inputs:
+      rc_tag:
+        description: "Normal release: 3.5.0-rc1 | Hotfix/re-release: 3.3.5 (plain semver resolves from DEV Harbor)"
+        type: string
+        required: true
 
 jobs:
   matrix-builder:
@@ -30,7 +26,7 @@ jobs:
         run: |
           MATRIX=$(jq -c '.' .github/workflows/matrix.json)
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          
+
   promote-prod:
     needs: [matrix-builder]
     runs-on: [self-hosted, Linux]
@@ -55,7 +51,7 @@ jobs:
           echo "$DOCKER_PASSWORD" | docker login "$HARBOR_URL" \
             -u "$DOCKER_USER" \
             --password-stdin
-            
+
       - name: Resolve release version
         id: release
         run: |
@@ -73,7 +69,6 @@ jobs:
             exit 0
           fi
           if [[ "$INPUT" =~ $RELEASE_REGEX ]]; then
-            echo "Release tag detected: $INPUT"
             RELEASE_TAG="$INPUT"
             echo "Release tag detected: $INPUT"
             echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"

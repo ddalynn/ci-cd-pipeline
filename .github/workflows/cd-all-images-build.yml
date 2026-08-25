@@ -100,6 +100,7 @@ jobs:
       hash: ${{ steps.generate_metadata.outputs.hash }}
       date: ${{ steps.generate_metadata.outputs.date }}
       channel_or_fallback: ${{ steps.generate_metadata.outputs.channel_or_fallback }}
+      is_dev_build: ${{ steps.generate_metadata.outputs.is_dev_build }}
 
     steps:
       - name: Checkout code
@@ -123,14 +124,20 @@ jobs:
 
           primary_tag=""
           channel_or_fallback=""
+          is_dev_build="false"
 
           if [ "${{ github.event_name }}" = "workflow_run" ] && [ "${{ github.event.workflow_run.head_branch || '' }}" = "integration" ]; then
-            primary_tag="dev"
-            channel_or_fallback="dev-integration"
+            branch_name="${{ github.event.workflow_run.head_branch }}"
+            safe_branch=$(echo "$branch_name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')
+            primary_tag="dev-${hash}"
+            channel_or_fallback="dev-${safe_branch}"
+            is_dev_build="true"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -z "$REL" ]; then
             branch_name="${{ github.ref_name }}"
             safe_branch=$(echo "$branch_name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')
             primary_tag="dev-${safe_branch}"
+            channel_or_fallback="${primary_tag}-${hash}"
+            is_dev_build="true"
           else
             if [ -z "$REL" ]; then
               git fetch --tags --force
@@ -157,6 +164,7 @@ jobs:
           echo "hash=$hash" >> $GITHUB_OUTPUT
           echo "date=$date" >> $GITHUB_OUTPUT
           echo "channel_or_fallback=$channel_or_fallback" >> $GITHUB_OUTPUT
+          echo "is_dev_build=$is_dev_build" >> $GITHUB_OUTPUT
 
   build:
     if: >
@@ -219,6 +227,28 @@ jobs:
           cp /home/runner/.config/pypoetry/auth.toml ./;
           chmod 600 ./auth.toml;
 
+      - name: Generate image tags
+        id: image-tags
+        shell: bash
+        env:
+          COMPONENT_TAG: ${{ matrix.component.tag }}
+          PRIMARY_TAG: ${{ needs.generate-metadata.outputs.primary_tag }}
+          CHANNEL_OR_FALLBACK: ${{ needs.generate-metadata.outputs.channel_or_fallback }}
+          HASH: ${{ needs.generate-metadata.outputs.hash }}
+          IS_DEV_BUILD: ${{ needs.generate-metadata.outputs.is_dev_build }}
+        run: |
+          if [ "$IS_DEV_BUILD" = "true" ]; then
+            image_tags="${COMPONENT_TAG}:${PRIMARY_TAG}"$'\n'"${COMPONENT_TAG}:${CHANNEL_OR_FALLBACK}"
+          else
+            image_tags="${COMPONENT_TAG}:${PRIMARY_TAG}"$'\n'"${COMPONENT_TAG}:${PRIMARY_TAG}-${HASH}"$'\n'"${COMPONENT_TAG}:${CHANNEL_OR_FALLBACK}"
+          fi
+
+          {
+            echo "tags<<EOF"
+            echo "$image_tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and Push Docker images
         uses: SGitHubActions/build-push-action@v3
         env:
@@ -227,10 +257,7 @@ jobs:
           JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
         with:
           registry: ${{ vars.HARBOR_URL }}
-          tags: |
-            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.primary_tag }}
-            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.primary_tag }}-${{ needs.generate-metadata.outputs.hash }}
-            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.channel_or_fallback }}
+          tags: ${{ steps.image-tags.outputs.tags }}
           file: ${{ matrix.component.dockerfile }}
           push: true
           username: ${{ vars.DOCKER_USERNAME }}

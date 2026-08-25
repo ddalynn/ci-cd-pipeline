@@ -161,9 +161,8 @@ Auto trigger
   │
   ├── Build images
   ├── Tag image:
-  │     ├── dev
   │     ├── dev-sha
-  │     ├── dev-intg
+  │     ├── dev-branch
   │
   │
   └── Push to Harbor DEV repository

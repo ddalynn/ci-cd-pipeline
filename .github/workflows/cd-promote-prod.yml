@@ -1,11 +1,11 @@
 name: 04 - Release images to PROD (Manual)
-run-name: "Release | ${{ inputs.rc_tag }} → PROD"
+run-name: "Release | ${{ inputs.source_tag }} → PROD"
 
 on:
   workflow_dispatch:
     inputs:
-      rc_tag:
-        description: "Normal release: 3.5.0-rc1 | Hotfix/re-release: 3.3.5 (plain semver resolves from DEV Harbor)"
+      source_tag:
+        description: "Source to promote: dev-<branch>, dev-<sha>, x.y.z-rcN, or x.y.z (re-release)"
         type: string
         required: true
 
@@ -52,154 +52,157 @@ jobs:
             -u "$DOCKER_USER" \
             --password-stdin
 
-      - name: Resolve release version
-        id: release
+      - name: Resolve input
+        id: input
         run: |
           set -euo pipefail
-          HOTFIX_REGEX='^[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9]{7,}$'
-          RC_PREFIX_REGEX='^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$'
-          RC_FULL_REGEX='^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+-[a-f0-9]{7,}$'
+          DEV_REGEX='^dev([a-z0-9._-].*)?$'
+          RC_REGEX='^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$'
           RELEASE_REGEX='^[0-9]+\.[0-9]+\.[0-9]+$'
-          INPUT="${{ inputs.rc_tag }}"
-          INPUT="$(echo -n "$INPUT" | xargs)"
-          if [[ "$INPUT" =~ $HOTFIX_REGEX ]]; then
-            RELEASE_TAG="${INPUT%-*}"
-            echo "Hotfix tag detected: $INPUT"
-            echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ "$INPUT" =~ $RELEASE_REGEX ]]; then
+          INPUT="$(echo -n "${{ inputs.source_tag }}" | xargs)"
+
+          if [[ "$INPUT" =~ $DEV_REGEX ]]; then
+            TYPE="dev"
+            BASE_VERSION=$(grep -E '^\s*version\s*=' pyproject.toml \
+              | head -1 \
+              | sed -E 's/.*=\s*"([^"]+)".*/\1/')
+            if [ -z "$BASE_VERSION" ]; then
+              echo "::error::Could not read version from pyproject.toml"
+              exit 1
+            fi
+            RELEASE_TAG="$BASE_VERSION"
+            echo "DEV source detected: $INPUT (release $RELEASE_TAG)"
+          elif [[ "$INPUT" =~ $RC_REGEX ]]; then
+            TYPE="rc"
+            RELEASE_TAG="${INPUT%%-rc*}"
+            echo "RC source detected: $INPUT (release $RELEASE_TAG)"
+          elif [[ "$INPUT" =~ $RELEASE_REGEX ]]; then
+            TYPE="release"
             RELEASE_TAG="$INPUT"
-            echo "Release tag detected: $INPUT"
-            echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if ! [[ "$INPUT" =~ $HOTFIX_REGEX ]] &&
-            ! [[ "$INPUT" =~ $RC_PREFIX_REGEX ]] &&
-            ! [[ "$INPUT" =~ $RC_FULL_REGEX ]] &&
-            ! [[ "$INPUT" =~ $RELEASE_REGEX ]]; then
-            echo "ERROR: Invalid tag '$INPUT'"
-            exit 1
-          fi
-          RELEASE_TAG="${INPUT%%-rc*}"
-          echo "Release inferred from input rc_tag: $RELEASE_TAG"
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve RC tag
-        id: rc
-        run: |
-          set -euo pipefail
-          RELEASE_REGEX='^[0-9]+\.[0-9]+\.[0-9]+$'
-          HOTFIX_REGEX='^[0-9]+\.[0-9]+\.[0-9]+-[a-f0-9]{7,}$'
-          RC_FULL_REGEX='^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+-[a-f0-9]{7,}$'
-          RC_PREFIX_REGEX='^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$'
-          INPUT="${{ inputs.rc_tag }}"
-          RELEASE_TAG="${{ steps.release.outputs.release_tag }}"
-          SRC_REPO="${{ matrix.component.uat_tag }}"
-          if [[ "$INPUT" =~ $HOTFIX_REGEX ]]; then
-            echo "Hotfix detected: $INPUT"
-            echo "rc_tag=$INPUT" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ "$INPUT" =~ $RELEASE_REGEX ]]; then
-            echo "Release tag detected: $INPUT"
-            echo "rc_tag=$INPUT" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          INPUT="$(echo -n "$INPUT" | xargs)" 
-          if [ -n "$INPUT" ] && ! [[ "$INPUT" =~ $RC_PREFIX_REGEX ]] && ! [[ "$INPUT" =~ $RC_FULL_REGEX ]]; then
-            echo "ERROR: Invalid rc_tag input '$INPUT'"
-            echo "Expected format: <semver>-rc<number> or full RC tag <semver>-rc<number>-<sha>"
-            exit 1
-          fi
-          TAGS=$(curl -s \
-            -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
-            "https://${HARBOR_URL}/v2/${SRC_REPO}/tags/list" \
-            | jq -r '.tags[]?' || true)
-          VALID_RC_TAGS=$(echo "$TAGS" | grep -E "$RC_FULL_REGEX" || true)
-          if [ -z "$INPUT" ]; then
-            MATCHING_RC_TAGS=$(echo "$VALID_RC_TAGS" | awk -v prefix="${RELEASE_TAG}-rc" 'index($0, prefix) == 1' || true)
-            RC_TAG=$(echo "$MATCHING_RC_TAGS" | sort -V | tail -1 || true)
-            if [ -z "$RC_TAG" ]; then
-              echo "No valid RC tag found in Harbor for release: $RELEASE_TAG"
-              exit 1
-            fi
-            echo "Auto-detected latest RC: $RC_TAG"
-          elif [[ "$INPUT" =~ $RC_FULL_REGEX ]]; then
-            RC_TAG=$(echo "$VALID_RC_TAGS" | grep -Fx "$INPUT" | head -1 || true)
-            if [ -z "$RC_TAG" ]; then
-              echo "No RC tag found matching exact full tag: $INPUT"
-              exit 1
-            fi
-            echo "Matched full RC tag: $RC_TAG"
+            echo "Release source detected: $INPUT"
           else
-            RC_TAG=$(echo "$VALID_RC_TAGS" | awk -v p="${INPUT}-" 'index($0, p) == 1' | sort -V | tail -1 || true)
-            if [ -z "$RC_TAG" ]; then
-              echo "No valid RC tag found matching prefix: $INPUT"
-              exit 1
-            fi
-            echo "Matched RC tag: $RC_TAG"
-          fi
-          if ! [[ "$RC_TAG" =~ $RC_FULL_REGEX ]]; then
-            echo "ERROR: Resolved RC tag '$RC_TAG' is malformed"
+            echo "::error::Invalid source_tag '$INPUT'. Expected dev-<branch>, dev-<sha>, x.y.z-rcN, or x.y.z"
             exit 1
           fi
-          echo "rc_tag=$RC_TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Promote release tags
+          echo "type=$TYPE" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "input=$INPUT" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve source image
+        id: source
         run: |
           set -euo pipefail
-          RELEASE_TAG="${{ steps.release.outputs.release_tag }}"
-          TAG="${{ steps.rc.outputs.rc_tag }}"
-          DATE=$(date +"%Y%m%d")
+          TYPE="${{ steps.input.outputs.type }}"
+          INPUT="${{ steps.input.outputs.input }}"
+          RELEASE_TAG="${{ steps.input.outputs.release_tag }}"
 
-          if [[ "$TAG" =~ ^${RELEASE_TAG}-rc[0-9]+-([a-f0-9]{7,})$ ]]; then
-              SHA="${BASH_REMATCH[1]}"
-              SOURCE_REPO="${{ matrix.component.uat_tag }}"
-
-          elif [[ "$TAG" =~ ^${RELEASE_TAG}-([a-f0-9]{7,})$ ]]; then
-              SHA="${BASH_REMATCH[1]}"
+          case "$TYPE" in
+            dev)
               SOURCE_REPO="${{ matrix.component.tag }}"
-
-          elif [[ "$TAG" == "$RELEASE_TAG" ]]; then
-              SOURCE_REPO="${{ matrix.component.tag }}"
-
+              DEV_SHA_REGEX='^dev-[a-f0-9]{7,}$'
               TAGS=$(curl -s \
                 -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
                 "https://${HARBOR_URL}/v2/${SOURCE_REPO}/tags/list" \
                 | jq -r '.tags[]?' || true)
 
-              SHA_TAG=$(echo "$TAGS" \
-                | grep -E "^${RELEASE_TAG}-[a-f0-9]{7,}$" \
-                | head -1)
-
-              if [ -z "$SHA_TAG" ]; then
-                echo "Unable to determine SHA for ${RELEASE_TAG}"
-                exit 1
+              if [[ "$INPUT" =~ $DEV_SHA_REGEX ]]; then
+                SOURCE_TAG="$INPUT"
+              else
+                SOURCE_TAG=$(echo "$TAGS" \
+                  | awk -v t="$INPUT" '
+                      index($0, t "-") == 1 {
+                        rest = substr($0, length(t) + 2)
+                        if (rest ~ /^[a-f0-9]{7,}-[0-9]{8}-[0-9]{6}$/) {
+                          print $0 "|2"
+                        } else if (rest ~ /^[a-f0-9]{7,}$/) {
+                          print $0 "|1"
+                        }
+                      }' \
+                  | sort -t'|' -k2,2nr \
+                  | head -1 \
+                  | cut -d'|' -f1)
               fi
 
-              SHA="${SHA_TAG#${RELEASE_TAG}-}"
-              TAG="$SHA_TAG"
+              if [ -z "$SOURCE_TAG" ] || ! echo "$TAGS" | grep -Fxq "$SOURCE_TAG"; then
+                echo "::error::No DEV image found in Harbor for '$INPUT'"
+                exit 1
+              fi
+              echo "Resolved DEV tag: $SOURCE_TAG"
+              ;;
 
+            rc)
+              SOURCE_REPO="${{ matrix.component.uat_tag }}"
+              TAGS=$(curl -s \
+                -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
+                "https://${HARBOR_URL}/v2/${SOURCE_REPO}/tags/list" \
+                | jq -r '.tags[]?' || true)
+
+              if ! echo "$TAGS" | grep -Fxq "$INPUT"; then
+                echo "::error::No RC tag found in Harbor matching '$INPUT'"
+                exit 1
+              fi
+              SOURCE_TAG="$INPUT"
+              echo "Resolved RC tag: $SOURCE_TAG"
+              ;;
+
+            release)
+              SOURCE_REPO="${{ matrix.component.tag }}"
+              TAGS=$(curl -s \
+                -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
+                "https://${HARBOR_URL}/v2/${SOURCE_REPO}/tags/list" \
+                | jq -r '.tags[]?' || true)
+              SOURCE_TAG=$(echo "$TAGS" \
+                | grep -E "^${RELEASE_TAG}-[a-f0-9]{7,}$" \
+                | head -1 || true)
+
+              if [ -z "$SOURCE_TAG" ]; then
+                echo "::error::Unable to determine SHA for release $RELEASE_TAG"
+                exit 1
+              fi
+              echo "Resolved release source tag: $SOURCE_TAG"
+              ;;
+          esac
+
+          echo "source_repo=$SOURCE_REPO" >> "$GITHUB_OUTPUT"
+          echo "source_tag=$SOURCE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Promote images
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="${{ steps.input.outputs.release_tag }}"
+          SOURCE_REPO="${{ steps.source.outputs.source_repo }}"
+          SOURCE_TAG="${{ steps.source.outputs.source_tag }}"
+          DATE=$(date +"%Y%m%d")
+
+          DEST_REPO="${{ matrix.component.uat_tag }}"
+          SRC_IMAGE="${HARBOR_URL}/${SOURCE_REPO}:${SOURCE_TAG}"
+
+          echo "Pulling source image"
+          docker pull "$SRC_IMAGE"
+
+          if [[ "$SOURCE_TAG" =~ ([a-f0-9]{7,})(-[0-9]{8}-[0-9]{6})?$ ]]; then
+            SHA="${BASH_REMATCH[1]}"
           else
-              echo "Invalid promotion source: $TAG"
-              exit 1
+            # RC tags carry no sha (e.g. x.y.z-rc1); derive one from the pulled image ID.
+            SHA=$(docker image inspect --format '{{.Id}}' "$SRC_IMAGE" | sed 's/^sha256://' | cut -c1-12)
           fi
           echo "SHA: $SHA"
           echo "DATE: $DATE"
-          RELEASE_IMAGE="${HARBOR_URL}/${{ matrix.component.uat_tag }}:${RELEASE_TAG}"
-          SHA_IMAGE="${HARBOR_URL}/${{ matrix.component.uat_tag }}:${RELEASE_TAG}-${SHA}"
-          DATE_IMAGE="${HARBOR_URL}/${{ matrix.component.uat_tag }}:${RELEASE_TAG}-${SHA}-${DATE}"
-          SRC_IMAGE="${HARBOR_URL}/${SOURCE_REPO}:${TAG}"
-          echo "Pulling RC image"
-          docker pull "$SRC_IMAGE"
+
+          RELEASE_IMAGE="${HARBOR_URL}/${DEST_REPO}:${RELEASE_TAG}"
+          SHA_IMAGE="${HARBOR_URL}/${DEST_REPO}:${RELEASE_TAG}-${SHA}"
+          DATE_IMAGE="${HARBOR_URL}/${DEST_REPO}:${RELEASE_TAG}-${SHA}-${DATE}"
+
           echo "Creating release tag"
           docker tag "$SRC_IMAGE" "$RELEASE_IMAGE"
           docker push "$RELEASE_IMAGE"
+
           echo "Creating sha tag"
           docker tag "$SRC_IMAGE" "$SHA_IMAGE"
           docker push "$SHA_IMAGE"
-          if [ -n "$DATE" ] && [ "$DATE" != "$SHA" ]; then
+
+          if [ "$DATE" != "$SHA" ]; then
             echo "Creating datetime tag"
             docker tag "$SRC_IMAGE" "$DATE_IMAGE"
             docker push "$DATE_IMAGE"

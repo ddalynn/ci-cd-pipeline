@@ -126,7 +126,7 @@ jobs:
 
           if [ "${{ github.event_name }}" = "workflow_run" ] && [ "${{ github.event.workflow_run.head_branch || '' }}" = "integration" ]; then
             primary_tag="dev"
-            channel_or_fallback="dev-intg"
+            channel_or_fallback="dev-integration"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -z "$REL" ]; then
             branch_name="${{ github.ref_name }}"
             safe_branch=$(echo "$branch_name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')
@@ -213,7 +213,7 @@ jobs:
           jf pip-config --repo-resolve ${{ vars.JFROG_REPO_PYPI }} --server-id-resolve dsp-jfrog
           pip install poetry | grep -v "Requirement already satisfied";
           poetry source add --priority=primary myjfrog ${{ vars.JFROG_BASE_URL }}/artifactory/api/pypi/${{ vars.JFROG_REPO_PYPI }}/simple;
-          poetry config http-basic.myjfrog ${{ secrets.JFROG_USERNAME }} ${{ secrets.JFROG_PASSWORD }};
+          poetry config http-basic.myjfrog ${{ vars.JFROG_USERNAME }} ${{ secrets.JFROG_PASSWORD }};
           cp /home/runner/.config/pip/pip.conf ./;
           chmod 600 ./pip.conf;
           cp /home/runner/.config/pypoetry/auth.toml ./;
@@ -242,20 +242,14 @@ jobs:
             --secret id=jfrog_password,env=JFROG_PASSWORD \
 
   trigger-prepare-release:
-    # workflow_run does not chain — dispatch 03 manually after a successful auto build
     if: >
       always() &&
       needs.build.result == 'success' &&
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'integration'
-    needs: [build]
-    runs-on: [self-hosted, Linux]
-    steps:
-      - name: Trigger 03 - Prepare Release
-        run: |
-          gh workflow run cd-promote-dev.yml \
-            --repo "${{ github.repository }}" \
-            --ref integration
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    needs: [build, generate-metadata]
+    uses: ./.github/workflows/cd-promote-dev.yml
+    with:
+      source_sha: ${{ needs.generate-metadata.outputs.primary_tag }}
+    secrets: inherit

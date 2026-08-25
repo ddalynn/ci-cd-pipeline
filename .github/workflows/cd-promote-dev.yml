@@ -12,6 +12,12 @@ on:
     types: [completed]
     branches: [integration]
 
+  workflow_call:
+    inputs:
+      source_sha:
+        type: string
+        required: false
+
   workflow_dispatch:
     inputs:
       source_sha:
@@ -27,6 +33,7 @@ jobs:
   prepare-rc:
     if: >
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_call' ||
       (
         github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success'

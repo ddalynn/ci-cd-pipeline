@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       source_tag:
-        description: "Source to promote: dev-<branch>, dev-<sha>, x.y.z-rcN, or x.y.z (re-release)"
+        description: "Source to promote: x.y.z-rcN, or x.y.z (re-release)"
         type: string
         required: true
 
@@ -56,23 +56,11 @@ jobs:
         id: input
         run: |
           set -euo pipefail
-          DEV_REGEX='^dev([a-z0-9._-].*)?$'
           RC_REGEX='^[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$'
           RELEASE_REGEX='^[0-9]+\.[0-9]+\.[0-9]+$'
           INPUT="$(echo -n "${{ inputs.source_tag }}" | xargs)"
 
-          if [[ "$INPUT" =~ $DEV_REGEX ]]; then
-            TYPE="dev"
-            BASE_VERSION=$(grep -E '^\s*version\s*=' pyproject.toml \
-              | head -1 \
-              | sed -E 's/.*=\s*"([^"]+)".*/\1/')
-            if [ -z "$BASE_VERSION" ]; then
-              echo "::error::Could not read version from pyproject.toml"
-              exit 1
-            fi
-            RELEASE_TAG="$BASE_VERSION"
-            echo "DEV source detected: $INPUT (release $RELEASE_TAG)"
-          elif [[ "$INPUT" =~ $RC_REGEX ]]; then
+          if [[ "$INPUT" =~ $RC_REGEX ]]; then
             TYPE="rc"
             RELEASE_TAG="${INPUT%%-rc*}"
             echo "RC source detected: $INPUT (release $RELEASE_TAG)"
@@ -81,7 +69,7 @@ jobs:
             RELEASE_TAG="$INPUT"
             echo "Release source detected: $INPUT"
           else
-            echo "::error::Invalid source_tag '$INPUT'. Expected dev-<branch>, dev-<sha>, x.y.z-rcN, or x.y.z"
+            echo "::error::Invalid source_tag '$INPUT'. Expected x.y.z-rcN or x.y.z"
             exit 1
           fi
 
@@ -98,39 +86,6 @@ jobs:
           RELEASE_TAG="${{ steps.input.outputs.release_tag }}"
 
           case "$TYPE" in
-            dev)
-              SOURCE_REPO="${{ matrix.component.tag }}"
-              DEV_SHA_REGEX='^dev-[a-f0-9]{7,}$'
-              TAGS=$(curl -s \
-                -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
-                "https://${HARBOR_URL}/v2/${SOURCE_REPO}/tags/list" \
-                | jq -r '.tags[]?' || true)
-
-              if [[ "$INPUT" =~ $DEV_SHA_REGEX ]]; then
-                SOURCE_TAG="$INPUT"
-              else
-                SOURCE_TAG=$(echo "$TAGS" \
-                  | awk -v t="$INPUT" '
-                      index($0, t "-") == 1 {
-                        rest = substr($0, length(t) + 2)
-                        if (rest ~ /^[a-f0-9]{7,}-[0-9]{8}-[0-9]{6}$/) {
-                          print $0 "|2"
-                        } else if (rest ~ /^[a-f0-9]{7,}$/) {
-                          print $0 "|1"
-                        }
-                      }' \
-                  | sort -t'|' -k2,2nr \
-                  | head -1 \
-                  | cut -d'|' -f1)
-              fi
-
-              if [ -z "$SOURCE_TAG" ] || ! echo "$TAGS" | grep -Fxq "$SOURCE_TAG"; then
-                echo "::error::No DEV image found in Harbor for '$INPUT'"
-                exit 1
-              fi
-              echo "Resolved DEV tag: $SOURCE_TAG"
-              ;;
-
             rc)
               SOURCE_REPO="${{ matrix.component.uat_tag }}"
               TAGS=$(curl -s \

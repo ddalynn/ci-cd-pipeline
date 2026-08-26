@@ -39,8 +39,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: ${{ github.token }}
-          persist-credentials: false
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true
           fetch-depth: 0
           submodules: recursive
 
@@ -109,9 +109,8 @@ jobs:
           set -euo pipefail
 
           export GH_HOST="${GITHUB_SERVER_URL#https://}"
-          gh auth status --hostname "$GH_HOST" || true
-
           MERGE_SHA="${GITHUB_SHA}"
+
           PR_JSON=$(gh api \
             --hostname "$GH_HOST" \
             "/repos/${GITHUB_REPOSITORY}/commits/${MERGE_SHA}/pulls" \
@@ -126,6 +125,8 @@ jobs:
           HEAD_REF=$(echo "$PR_JSON" | jq -r '.head.ref // ""')
           LABELS=$(echo "$PR_JSON" | jq -r '.labels[].name // empty')
 
+          echo "Incoming branch: $HEAD_REF"
+
           if [[ "$HEAD_REF" =~ ^hotfix([/-].*)?$ ]]; then
             echo "Hotfix branch merged into integration; skipping bump here."
             echo "should_bump=false" >> "$GITHUB_OUTPUT"
@@ -137,24 +138,57 @@ jobs:
             exit 1
           fi
 
-          git fetch origin main integration
+          git fetch origin main integration "$HEAD_REF"
 
-          MAIN_VERSION=$(git show origin/main:pyproject.toml | sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p')
-          INTEGRATION_VERSION=$(git show origin/integration:pyproject.toml | sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p')
+          MAIN_VERSION=$(git show origin/main:pyproject.toml \
+            | sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p')
 
+          INTEGRATION_VERSION=$(git show origin/integration:pyproject.toml \
+            | sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p')
+
+          INCOMING_VERSION=$(git show "origin/${HEAD_REF}:pyproject.toml" \
+            | sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p')
+
+          echo "Main:        $MAIN_VERSION"
+          echo "Integration: $INTEGRATION_VERSION"
+          echo "Incoming:    $INCOMING_VERSION"
+
+          if [ "$INCOMING_VERSION" != "$MAIN_VERSION" ]; then
+
+            if [ "$INCOMING_VERSION" != "$INTEGRATION_VERSION" ]; then
+              echo "Incoming branch already has release version $INCOMING_VERSION."
+              echo "Integration will use $INCOMING_VERSION."
+
+              echo "should_bump=true" >> "$GITHUB_OUTPUT"
+              echo "use_incoming_version=true" >> "$GITHUB_OUTPUT"
+              echo "incoming_version=$INCOMING_VERSION" >> "$GITHUB_OUTPUT"
+            else
+              echo "Incoming version already matches integration."
+              echo "should_bump=false" >> "$GITHUB_OUTPUT"
+            fi
+
+            exit 0
+          fi
           if [ "$MAIN_VERSION" != "$INTEGRATION_VERSION" ]; then
-            echo "Active release cycle detected (${INTEGRATION_VERSION}); skip bump."
+            echo "Active release cycle already exists: $INTEGRATION_VERSION"
+            echo "No bump required."
+
             echo "should_bump=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          echo "No active release cycle."
+
+          BUMP="minor"
+
           if echo "$LABELS" | grep -q '^major$'; then
             BUMP="major"
-          else
-            BUMP="minor"
           fi
 
+          echo "Starting new release cycle with $BUMP bump."
+
           echo "should_bump=true" >> "$GITHUB_OUTPUT"
+          echo "use_incoming_version=false" >> "$GITHUB_OUTPUT"
           echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
 
       - name: Bump integration version
@@ -165,11 +199,42 @@ jobs:
         id: integration_version
         run: |
           set -euo pipefail
-          poetry version "${{ steps.integration_bump.outputs.bump }}"
+
+          if [ "${{ steps.integration_bump.outputs.use_incoming_version }}" = "true" ]; then
+
+            NEW_VERSION="${{ steps.integration_bump.outputs.incoming_version }}"
+
+            echo "Using release version from incoming branch: $NEW_VERSION"
+
+            poetry version "$NEW_VERSION"
+
+          else
+
+            BUMP="${{ steps.integration_bump.outputs.bump }}"
+
+            echo "Starting new release cycle with: $BUMP"
+
+            poetry version "$BUMP"
+
+            NEW_VERSION=$(poetry version -s)
+
+          fi
+
           NEW_VERSION=$(poetry version -s)
-          SRC_DIR=$(awk -F'=' '/^\s*src_directory\s*=/ {gsub(/^[ \t"]+|[ \t"]+$/,"",$2); gsub(/"/,"",$2); print $2}' pyproject.toml)
+
+          SRC_DIR=$(awk -F'=' \
+            '/^\s*src_directory\s*=/ {
+              gsub(/^[ \t"]+|[ \t"]+$/,"",$2);
+              gsub(/"/,"",$2);
+              print $2
+            }' pyproject.toml)
+
           VERSION_FILE="${SRC_DIR}/__version__.py"
-          sed -i -E 's/^(__version__\s*=\s*")[^"]*(")/\1'"$NEW_VERSION"'\2/' "$VERSION_FILE"
+
+          sed -i -E \
+            's/^(__version__\s*=\s*")[^"]*(")/\1'"$NEW_VERSION"'\2/' \
+            "$VERSION_FILE"
+
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Commit integration version bump
@@ -280,7 +345,6 @@ jobs:
           fi
 
           EXISTING_PR=$(gh pr list \
-            --hostname "$GH_HOST" \
             --base integration \
             --head "$HOTFIX_BRANCH" \
             --state open \
@@ -293,7 +357,6 @@ jobs:
           fi
 
           gh pr create \
-            --hostname "$GH_HOST" \
             --base integration \
             --head "$HOTFIX_BRANCH" \
             --title "chore(hotfix): merge ${HOTFIX_BRANCH} back to integration (${RELEASE_TAG})" \

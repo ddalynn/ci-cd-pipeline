@@ -1,13 +1,18 @@
 name: 02 - Build images (Auto)
 run-name: >-
-  ${{ 
+  ${{
     inputs.release_name &&
-    format('Building images: {0}', inputs.release_name) ||
-    (github.event_name == 'workflow_dispatch' && format('Building images: dev-{0}', github.ref_name)) ||
-    format('Building images: dev-{0}', github.event.workflow_run.head_sha || github.sha)
+    format('Build: {0}', inputs.release_name) ||
+    (
+      github.event_name == 'workflow_dispatch' &&
+      format('Build: dev-{0} ({1})', github.ref_name, github.sha)
+    ) ||
+    format(
+      'Build: dev-{0} ({1})',
+      github.event.workflow_run.head_branch,
+      github.event.workflow_run.head_sha
+    )
   }}
-permissions:
-  actions: write
 
 on:
   workflow_call:
@@ -34,32 +39,50 @@ on:
         required: true
         type: boolean
         default: true
+      auto_create_pr_to_integration:
+        description: "Automatically create/update a PR from the selected branch to integration after the DEV image is built."
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: build-images-${{ github.event_name == 'workflow_dispatch' && github.ref_name || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: ${{ github.event.workflow_run.outputs.app_version || github.event.inputs.release_name || '' }}
 
 jobs:
   build-poetry-base:
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      github.event.inputs.rebuild_poetry == 'true'
-    uses: ./.github/workflows/cd-base-image-build.yml
-    with:
-      rebuild_poetry: ${{ github.event.inputs.rebuild_poetry == 'true' }}
-    secrets: inherit
-
-  clean-poetry-cache:
     if: >
       (
         github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success' &&
         github.event.workflow_run.head_branch == 'integration'
       ) ||
-      github.event.inputs.clean_poetry_cache == 'true'
+      (
+        github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.rebuild_poetry == 'true'
+      )
+    uses: ./.github/workflows/cd-base-image-build.yml
+    with:
+      rebuild_poetry: true
+    secrets: inherit
+
+  clean-poetry-cache:
+    if: ${{ github.event_name == 'workflow_run' || github.event.inputs.clean_poetry_cache == 'true' }}
     runs-on: [self-hosted, Linux]
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.release_name || github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ github.event.inputs.release_name || (github.event_name == 'workflow_run' && 'integration' || github.ref) }}
 
       - run: make clean_poetry
 
@@ -69,22 +92,136 @@ jobs:
       (
         github.event_name == 'workflow_run' &&
         github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.head_branch == 'integration'
+        (
+          github.event.workflow_run.head_branch == 'integration' ||
+          github.event.workflow_run.head_branch == 'main'
+        )
       )
     runs-on: [self-hosted, Linux]
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      build_sha: ${{ steps.prepare_dev_version.outputs.build_sha || steps.current_sha.outputs.build_sha }}
+      dev_version: ${{ steps.prepare_dev_version.outputs.dev_version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: SGitHubActions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Checkout code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.release_name || github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ github.event.inputs.release_name || (github.event_name == 'workflow_run' && 'integration' || github.ref) }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
       - name: Read matrix.json
         id: set-matrix
         run: |
           MATRIX=$(jq -c '.' .github/workflows/matrix.json)
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare manual DEV version
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_name == ''
+        id: prepare_dev_version
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BRANCH="${GITHUB_REF_NAME}"
+
+          SAFE_BRANCH=$(echo "$BRANCH" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[^a-z0-9._-]+/-/g')
+
+          git fetch origin main integration "$BRANCH" --prune
+
+          MAIN_VERSION=$(git show origin/main:pyproject.toml \
+            | sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p')
+
+          INTEGRATION_VERSION=$(git show origin/integration:pyproject.toml \
+            | sed -nE 's/^version\s*=\s*"([^"]+)"/\1/p')
+
+          BRANCH_VERSION=$(poetry version -s)
+
+          echo "Main version:        $MAIN_VERSION"
+          echo "Integration version: $INTEGRATION_VERSION"
+          echo "Branch version:      $BRANCH_VERSION"
+
+          SRC_DIR=$(awk -F'=' \
+            '/^\s*src_directory\s*=/ {
+              gsub(/^[ \t"]+|[ \t"]+$/,"",$2);
+              gsub(/"/,"",$2);
+              print $2
+            }' pyproject.toml)
+
+          VERSION_FILE="${SRC_DIR}/__version__.py"
+
+          CURRENT_DEV_VERSION=$(sed -nE 's/^__version__\s*=\s*"([^"]+)"/\1/p' "$VERSION_FILE")
+          PREPARED_VERSION="${BRANCH_VERSION}-dev-${SAFE_BRANCH}"
+
+          if [ "$CURRENT_DEV_VERSION" = "$PREPARED_VERSION" ]; then
+            TARGET_VERSION="$BRANCH_VERSION"
+            echo "Branch already prepared for DEV version $CURRENT_DEV_VERSION."
+          elif [ "$MAIN_VERSION" != "$INTEGRATION_VERSION" ]; then
+            TARGET_VERSION="$INTEGRATION_VERSION"
+            echo "Active release cycle detected: $TARGET_VERSION"
+            poetry version "$TARGET_VERSION"
+          else
+            echo "No active release cycle; starting a minor DEV cycle."
+            poetry version minor
+            TARGET_VERSION=$(poetry version -s)
+          fi
+
+          DEV_VERSION="${TARGET_VERSION}-dev-${SAFE_BRANCH}"
+
+          sed -i -E \
+            's/^(__version__\s*=\s*")[^"]*(")/\1'"$DEV_VERSION"'\2/' \
+            "$VERSION_FILE"
+
+          echo "TARGET_VERSION=$TARGET_VERSION"
+          echo "DEV_VERSION=$DEV_VERSION"
+
+          echo "target_version=$TARGET_VERSION" >> "$GITHUB_OUTPUT"
+          echo "dev_version=$DEV_VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_file=$VERSION_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Commit DEV version
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.release_name == ''
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_APP_ID: ${{ vars.GH_APP_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "${GH_APP_ID}[bot]"
+          git config user.email "${GH_APP_ID}+${GH_APP_ID}[bot]@users.noreply.github.com"
+
+          git add pyproject.toml
+          git add "${{ steps.prepare_dev_version.outputs.version_file }}"
+
+          if git diff --staged --quiet; then
+            echo "No version changes to commit."
+            exit 0
+          fi
+
+          git commit \
+            -m "chore: prepare DEV version ${{ steps.prepare_dev_version.outputs.dev_version }} [skip ci]"
+
+          git push \
+            "https://x-access-token:${APP_TOKEN}@${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git" \
+            HEAD:"${GITHUB_REF_NAME}"
+
+          echo "build_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Record current commit
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.release_name != ''
+        id: current_sha
+        run: echo "build_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   generate-metadata:
     if: >
@@ -95,19 +232,18 @@ jobs:
         github.event.workflow_run.head_branch == 'integration'
       )
     runs-on: [self-hosted, Linux]
+    needs: [matrix-builder]
     outputs:
       primary_tag: ${{ steps.generate_metadata.outputs.primary_tag }}
+      secondary_tag: ${{ steps.generate_metadata.outputs.secondary_tag }}
       hash: ${{ steps.generate_metadata.outputs.hash }}
-      date: ${{ steps.generate_metadata.outputs.date }}
-      channel_or_fallback: ${{ steps.generate_metadata.outputs.channel_or_fallback }}
-      is_dev_build: ${{ steps.generate_metadata.outputs.is_dev_build }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.release_name || github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ github.event.inputs.release_name || needs.matrix-builder.outputs.build_sha || (github.event_name == 'workflow_run' && 'integration' || github.ref) }}
 
       - name: Fetch all tags
         run: git fetch --tags
@@ -117,54 +253,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           hash=$(git rev-parse --short HEAD)
-          date=$(date +"%Y%m%d-%H%M%S")
+
           REL="${{ github.event.inputs.release_name || '' }}"
           REL="$(echo -n "$REL" | xargs)"
 
-          primary_tag=""
-          channel_or_fallback=""
-          is_dev_build="false"
-
-          if [ "${{ github.event_name }}" = "workflow_run" ] && [ "${{ github.event.workflow_run.head_branch || '' }}" = "integration" ]; then
-            branch_name="${{ github.event.workflow_run.head_branch }}"
-            safe_branch=$(echo "$branch_name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')
-            primary_tag="dev-${hash}"
-            channel_or_fallback="dev-${safe_branch}"
-            is_dev_build="true"
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -z "$REL" ]; then
-            branch_name="${{ github.ref_name }}"
-            safe_branch=$(echo "$branch_name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')
-            primary_tag="dev-${safe_branch}"
-            channel_or_fallback="${primary_tag}-${hash}"
-            is_dev_build="true"
-          else
-            if [ -z "$REL" ]; then
-              git fetch --tags --force
-              REL="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
-            fi
-
-            if [[ "$REL" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              primary_tag="${REL#v}"
-            elif [[ "$REL" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              primary_tag="$REL"
-            elif [ -n "$REL" ]; then
-              safe_ref=$(echo "$REL" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//')
-              primary_tag="dev-${safe_ref}"
-            else
-              primary_tag="dev"
-            fi
+          if [ -z "$REL" ]; then
+            git fetch --tags --force
+            REL="$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
           fi
-
-          if [ -z "$channel_or_fallback" ]; then
-            channel_or_fallback="${primary_tag}-${hash}-${date}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -z "$REL" ]; then
+            primary_tag="${{ needs.matrix-builder.outputs.dev_version }}"
+            secondary_tag="${primary_tag}-${hash}"
+          elif [ -n "$REL" ]; then
+            primary_tag="$REL"
+            secondary_tag="${REL}-${hash}"
+          else
+            branch="${{ github.event.workflow_run.head_branch }}"
+            safe_branch=$(echo "$branch" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's/[^a-z0-9._-]+/-/g')
+            base_version=$(poetry version -s)
+            primary_tag="${base_version}-dev-${safe_branch}"
+            secondary_tag="${primary_tag}-${hash}"
           fi
 
           echo "primary_tag=$primary_tag" >> $GITHUB_OUTPUT
+          echo "secondary_tag=$secondary_tag" >> $GITHUB_OUTPUT
           echo "hash=$hash" >> $GITHUB_OUTPUT
-          echo "date=$date" >> $GITHUB_OUTPUT
-          echo "channel_or_fallback=$channel_or_fallback" >> $GITHUB_OUTPUT
-          echo "is_dev_build=$is_dev_build" >> $GITHUB_OUTPUT
 
   build:
     if: >
@@ -173,8 +290,7 @@ jobs:
         github.event_name == 'workflow_dispatch' ||
         (
           github.event_name == 'workflow_run' &&
-          github.event.workflow_run.conclusion == 'success' &&
-          github.event.workflow_run.head_branch == 'integration'
+          github.event.workflow_run.conclusion == 'success'
         )
       ) &&
       (
@@ -199,7 +315,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.release_name || github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ github.event.inputs.release_name || needs.matrix-builder.outputs.build_sha || (github.event_name == 'workflow_run' && 'integration' || github.ref) }}
 
       - name: Install Python ${{ vars.PYTHON_VERSION }}
         uses: SGitHubActions/setup-python@stable
@@ -223,31 +339,9 @@ jobs:
           poetry source add --priority=primary myjfrog ${{ vars.JFROG_BASE_URL }}/artifactory/api/pypi/${{ vars.JFROG_REPO_PYPI }}/simple;
           poetry config http-basic.myjfrog ${{ vars.JFROG_USERNAME }} ${{ secrets.JFROG_PASSWORD }};
           cp /home/runner/.config/pip/pip.conf ./;
-          chmod 600 ./pip.conf;
+          chmod 777 ./pip.conf;
           cp /home/runner/.config/pypoetry/auth.toml ./;
-          chmod 600 ./auth.toml;
-
-      - name: Generate image tags
-        id: image-tags
-        shell: bash
-        env:
-          COMPONENT_TAG: ${{ matrix.component.tag }}
-          PRIMARY_TAG: ${{ needs.generate-metadata.outputs.primary_tag }}
-          CHANNEL_OR_FALLBACK: ${{ needs.generate-metadata.outputs.channel_or_fallback }}
-          HASH: ${{ needs.generate-metadata.outputs.hash }}
-          IS_DEV_BUILD: ${{ needs.generate-metadata.outputs.is_dev_build }}
-        run: |
-          if [ "$IS_DEV_BUILD" = "true" ]; then
-            image_tags="${COMPONENT_TAG}:${PRIMARY_TAG}"$'\n'"${COMPONENT_TAG}:${CHANNEL_OR_FALLBACK}"
-          else
-            image_tags="${COMPONENT_TAG}:${PRIMARY_TAG}"$'\n'"${COMPONENT_TAG}:${PRIMARY_TAG}-${HASH}"$'\n'"${COMPONENT_TAG}:${CHANNEL_OR_FALLBACK}"
-          fi
-
-          {
-            echo "tags<<EOF"
-            echo "$image_tags"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          chmod 777 ./auth.toml;
 
       - name: Build and Push Docker images
         uses: SGitHubActions/build-push-action@v3
@@ -257,7 +351,9 @@ jobs:
           JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
         with:
           registry: ${{ vars.HARBOR_URL }}
-          tags: ${{ steps.image-tags.outputs.tags }}
+          tags: |
+            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.primary_tag }}
+            ${{ matrix.component.tag }}:${{ needs.generate-metadata.outputs.secondary_tag }}
           file: ${{ matrix.component.dockerfile }}
           push: true
           username: ${{ vars.DOCKER_USERNAME }}
@@ -268,15 +364,73 @@ jobs:
             --secret id=jfrog_username,env=JFROG_USERNAME \
             --secret id=jfrog_password,env=JFROG_PASSWORD \
 
-  trigger-prepare-release:
+  create-dev-pr:
+    name: Create DEV PR
+    needs: [build, matrix-builder]
     if: >
+      needs.build.result == 'success' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.release_name == '' &&
+      github.event.inputs.auto_create_pr_to_integration == 'true'
+    runs-on: [self-hosted, Linux]
+    steps:
+      - uses: SGitHubActions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Create or reuse PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          export GH_HOST="${GITHUB_SERVER_URL#https://}"
+          EXISTING_PR=$(gh pr list --hostname "$GH_HOST" \
+            --base integration --head "$BRANCH" --state open \
+            --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR already exists: #${EXISTING_PR}"
+            exit 0
+          fi
+
+          gh pr create --hostname "$GH_HOST" \
+            --base integration --head "$BRANCH" \
+            --title "Prepare DEV version ${{ needs.matrix-builder.outputs.dev_version }}" \
+            --body "Automated DEV build for ${{ needs.matrix-builder.outputs.dev_version }}."
+
+  dispatch-rc:
+    name: Trigger RC Promotion
+    needs:
+      - build
+      - generate-metadata
+    runs-on: [self-hosted, Linux]
+
+    if: |
       always() &&
       needs.build.result == 'success' &&
-      github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'integration'
-    needs: [build, generate-metadata]
-    uses: ./.github/workflows/cd-promote-dev.yml
-    with:
-      source_sha: ${{ needs.generate-metadata.outputs.primary_tag }}
-    secrets: inherit
+      (
+        github.event_name == 'workflow_run' ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.promote_to_rc == 'true'
+        )
+      )
+
+    steps:
+      - name: Dispatch RC workflow
+        uses: SGitHubActions/dispatch-workflow@v2
+        with:
+          dispatch-method: workflow_dispatch
+          ref: ${{ github.ref }}
+          repo: ${{ github.event.repository.name }}
+          owner: ${{ github.repository_owner }}
+          workflow: cd-promote-dev.yml
+          token: ${{ secrets.GITHUB_TOKEN }}
+          workflow-inputs: |
+            {
+              "source_sha": "${{ needs.generate-metadata.outputs.secondary_tag }}"
+            }
+          discover: false

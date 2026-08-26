@@ -10,7 +10,7 @@ on:
     inputs:
       rebuild_poetry:
         type: boolean
-        default: false
+        default: true
 
   workflow_dispatch:
     inputs:
@@ -18,16 +18,21 @@ on:
         required: false
         type: boolean
         default: true
+      distinct_id:
+        description: "Distinct ID"
+        required: false
+        type: string
 
 jobs:
   build:
     if: >
       github.event_name == 'schedule' ||
+      github.event_name == 'workflow_call' ||
       inputs.rebuild_poetry == true
     runs-on: [self-hosted, Linux]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
 

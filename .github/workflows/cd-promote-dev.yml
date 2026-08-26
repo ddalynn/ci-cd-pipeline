@@ -1,43 +1,37 @@
-name: 03 - Prepare Release
+name: 03 - Prepare Release RC (Auto)
 run-name: >-
-  ${{
-    github.event_name == 'workflow_run' &&
-    format('Prepare Release | auto | {0} → RC', github.event.workflow_run.head_sha) ||
-    format('Prepare Release | manual | {0} → RC', inputs.source_sha)
-  }}
+  ${{ format('Prepare Release | {0} → RC', inputs.source_sha) }}
 
 on:
-  workflow_run:
-    workflows: ["02 - Build images (Auto)"]
-    types: [completed]
-    branches: [integration]
-
   workflow_call:
     inputs:
       source_sha:
+        required: true
         type: string
-        required: false
 
   workflow_dispatch:
     inputs:
       source_sha:
-        description: "Run from a non-main branch. Enter a DEV tag: dev-<sha>, dev-<branch>, dev-intg"
-        required: false
+        description: "Run from a non-main branch. Enter a DEV tag: dev-<sha>, dev-<branch>"
+        required: true
         type: string
+      distinct_id:
+        description: "Distinct ID"
+        required: false
 
 concurrency:
   group: promote-rc-uat
   cancel-in-progress: false
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   prepare-rc:
     if: >
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'workflow_call' ||
-      (
-        github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success'
-      )
+      github.event_name == 'workflow_call'
     runs-on: [self-hosted, Linux]
     outputs:
       rc_version: ${{ steps.compute.outputs.rc_version }}
@@ -45,6 +39,7 @@ jobs:
       source_sha: ${{ steps.compute.outputs.source_sha }}
       input_source_tag: ${{ steps.source.outputs.source_tag }}
       matrix: ${{ steps.matrix.outputs.matrix }}
+      rc_build_sha: ${{ steps.commit_rc_version.outputs.rc_build_sha }}
     env:
       HARBOR_URL: ${{ vars.HARBOR_URL }}
       DOCKER_USER: ${{ vars.DOCKER_USERNAME }}
@@ -56,13 +51,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            SHORT_SHA="$(echo "${{ github.event.workflow_run.head_sha }}" | cut -c1-7)"
-            SOURCE_TAG="dev-${SHORT_SHA}"
-          else
-            SOURCE_TAG="${{ inputs.source_sha }}"
-          fi
-
+          SOURCE_TAG="${{ inputs.source_sha }}"
           SOURCE_TAG="$(echo -n "$SOURCE_TAG" | xargs)"
           if [ -z "$SOURCE_TAG" ]; then
             echo "::error::source_sha is required for manual trigger."
@@ -75,12 +64,11 @@ jobs:
         run: |
           set -euo pipefail
           SOURCE_TAG="${{ steps.source.outputs.source_tag }}"
-          if ! [[ "$SOURCE_TAG" =~ ^(dev([a-z0-9._-].*)?|[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "::error::Invalid source_sha '$SOURCE_TAG'. Expected dev-<sha>, dev-<branch>, dev-intg, or x.y.z"
+          if ! [[ "$SOURCE_TAG" =~ ^(dev([a-z0-9._-].*)?|[0-9]+\.[0-9]+\.[0-9]+(-dev-[a-z0-9._-]+(-[a-f0-9]{7,})?)?)$ ]]; then
+            echo "::error::Invalid source_sha '$SOURCE_TAG'. Expected a DEV tag or x.y.z"
             echo "## Input Validation Failed" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          # if tag is dev-<hex only>, the SHA must be at least 7 characters
           if [[ "$SOURCE_TAG" =~ ^dev-([a-f0-9]+)$ ]]; then
             SHA_PART="${BASH_REMATCH[1]}"
             if [[ ${#SHA_PART} -lt 7 ]]; then
@@ -91,19 +79,17 @@ jobs:
             fi
           fi
 
-      - name: Validate execution branch
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ "${GITHUB_REF_NAME}" = "main" ]; then
-            echo "::error::This workflow must not be run from main."
-            exit 1
-          fi
+      - uses: SGitHubActions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: integration
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Read matrix.json
         id: matrix
@@ -134,11 +120,10 @@ jobs:
           echo "Target version : $TARGET_VERSION"
           echo "Source tag     : $SOURCE_TAG"
 
-          # Try direct extraction first for tags that already contain sha, e.g.
-          # dev-abc1234 or dev-feature-abc1234-20260101-120000
           if [[ "$SOURCE_TAG" =~ ([a-f0-9]{7,})(-[0-9]{8}-[0-9]{6})?$ ]]; then
             SOURCE_SHA="${BASH_REMATCH[1]}"
-          elif [[ "$SOURCE_TAG" =~ ^dev([a-z0-9._-].*)?$ ]]; then
+
+          elif [[ "$SOURCE_TAG" =~ ^(dev([a-z0-9._-].*)?|[0-9]+\.[0-9]+\.[0-9]+-dev-[a-z0-9._-]+)$ ]]; then
             SRC_REPO=$(jq -r '.[0].tag' .github/workflows/matrix.json)
 
             ALL_SRC_TAGS=$(curl -s \
@@ -146,45 +131,33 @@ jobs:
               "https://${HARBOR_URL}/v2/${SRC_REPO}/tags/list" \
               | jq -r '.tags[]?' || true)
 
-            # Resolve SHA from sibling tags, preferring timestamped variants first.
-            SOURCE_SHA=$(echo "$ALL_SRC_TAGS" \
-              | awk -v t="$SOURCE_TAG" '
-                index($0, t "-") == 1 {
-                  rest = substr($0, length(t) + 2)
-                  if (rest ~ /^[a-f0-9]{7,}-[0-9]{8}-[0-9]{6}$/) {
-                    split(rest, a, "-")
-                    print a[1] "|2"
-                  } else if (rest ~ /^[a-f0-9]{7,}$/) {
-                    print rest "|1"
-                  }
-                }
-              ' \
-              | sort -t'|' -k2,2nr \
-              | head -1 \
-              | cut -d'|' -f1)
-
-            if [ -z "$SOURCE_SHA" ]; then
-              echo "::error::Could not resolve source SHA from Harbor tags for $SOURCE_TAG."
+            # Verify the tag exists, but don't require a SHA
+            if ! echo "$ALL_SRC_TAGS" | grep -qx "$SOURCE_TAG"; then
+              echo "::error::Source tag '$SOURCE_TAG' does not exist in Harbor."
               exit 1
             fi
+
+            SOURCE_SHA=""
+
           else
             echo "::error::Could not determine source SHA from $SOURCE_TAG"
             exit 1
           fi
-          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
-          # Check all UAT repos and take the highest rcN to keep numbering consistent across components
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           LAST_RC=0
           while IFS= read -r DST_REPO; do
             ALL_DST_TAGS=$(curl -s \
               -u "${DOCKER_USER}:${DOCKER_PASSWORD}" \
               "https://${HARBOR_URL}/v2/${DST_REPO}/tags/list" \
               | jq -r '.tags[]?' || true)
-            COMP_MAX=$(echo "$ALL_DST_TAGS" \
-              | grep -E "^${TARGET_VERSION}-rc[0-9]+$" \
-              | sed -E "s/^${TARGET_VERSION}-rc([0-9]+)$/\1/" \
-              | sort -n \
-              | tail -1)
+              COMP_MAX=$(echo "$ALL_DST_TAGS" \
+                | grep -E "^${TARGET_VERSION}-rc[0-9]+$" || true)
+
+              COMP_MAX=$(echo "$COMP_MAX" \
+                | sed -E "s/^${TARGET_VERSION}-rc([0-9]+)$/\1/" \
+                | sort -n \
+                | tail -1)
             if [ -n "$COMP_MAX" ] && [ "$COMP_MAX" -gt "$LAST_RC" ]; then
               LAST_RC="$COMP_MAX"
             fi
@@ -201,6 +174,33 @@ jobs:
           echo "effective_source_tag=${SOURCE_TAG}" >> "$GITHUB_OUTPUT"
           echo "Computed RC version    : ${RC_VERSION}"
           echo "Effective source tag   : ${SOURCE_TAG}"
+
+      - name: Update and commit RC runtime version
+        id: commit_rc_version
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_APP_ID: ${{ vars.GH_APP_ID }}
+        run: |
+          set -euo pipefail
+
+          SRC_DIR=$(awk -F'=' '/^\s*src_directory\s*=/ {gsub(/^[ \t"]+|[ \t"]+$/,"",$2); gsub(/"/,"",$2); print $2}' pyproject.toml)
+          VERSION_FILE="${SRC_DIR}/__version__.py"
+          RC_VERSION="${{ steps.compute.outputs.rc_version }}"
+
+          sed -i -E 's/^(__version__\s*=\s*")[^"]*(")/\1'"$RC_VERSION"'\2/' "$VERSION_FILE"
+
+          git config user.name "${GH_APP_ID}[bot]"
+          git config user.email "${GH_APP_ID}+${GH_APP_ID}[bot]@users.noreply.github.com"
+          git add "$VERSION_FILE"
+
+          if git diff --staged --quiet; then
+            echo "RC runtime version already committed: $RC_VERSION"
+          else
+            git commit -m "chore: prepare RC version ${RC_VERSION} [skip ci]"
+            git push "https://x-access-token:${APP_TOKEN}@${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git" HEAD:integration
+          fi
+
+          echo "rc_build_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
   promote-image-tags:
     if: needs.prepare-rc.result == 'success'
@@ -222,84 +222,65 @@ jobs:
       DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
 
     steps:
-      - name: Login to Harbor
-        run: |
-          echo "$DOCKER_PASSWORD" | docker login "$HARBOR_URL" -u "$DOCKER_USER" --password-stdin
+      - uses: SGitHubActions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
-      - name: Wait for image availability
-        run: |
-          set -euo pipefail
+      - name: Checkout RC commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.prepare-rc.outputs.rc_build_sha }}
+          token: ${{ steps.app-token.outputs.token }}
 
-          SRC_IMAGE="${HARBOR_URL}/${{ matrix.component.tag }}:${{ needs.prepare-rc.outputs.effective_source_tag }}"
-          echo "Waiting for image to become available: $SRC_IMAGE"
-          for i in {1..40}; do
-            if docker manifest inspect "$SRC_IMAGE" >/dev/null 2>&1; then
-              echo "Image is available."
-              exit 0
-            fi
-            echo "Attempt $i/40 - image not ready yet..."
-            sleep 15
-          done
-          echo "::error::Image never became available: $SRC_IMAGE"
-          exit 1
+      - name: Install Python ${{ vars.PYTHON_VERSION }}
+        uses: SGitHubActions/setup-python@stable
+        with:
+          python-version: "${{ vars.PYTHON_VERSION }}"
+          index-url: https://${{ vars.JFROG_USERNAME }}:${{ secrets.JFROG_PASSWORD }}@${{ vars.JFROG_URL }}${{ vars.KEAR_ID }}/simple
 
-      - name: Retag DEV image as RC in UAT registry
-        id: promote-rc
-        run: |
-          set -euo pipefail
-
-          RC_VERSION="${{ needs.prepare-rc.outputs.rc_version }}"
-          EFFECTIVE_SOURCE="${{ needs.prepare-rc.outputs.effective_source_tag }}"
-
-          if [ -z "$RC_VERSION" ]; then
-            echo "RC version is empty. Failing promotion."
-            exit 1
-          fi
-
-            SOURCE_SHA="${{ needs.prepare-rc.outputs.source_sha }}"
-
-          SRC_IMAGE="${HARBOR_URL}/${{ matrix.component.tag }}:${EFFECTIVE_SOURCE}"
-          DST_IMAGE="${HARBOR_URL}/${{ matrix.component.uat_tag }}:${RC_VERSION}"
-          DST_IMAGE_SHA="${HARBOR_URL}/${{ matrix.component.uat_tag }}:${RC_VERSION}-${SOURCE_SHA}"
-
-          echo "Pulling DEV image: $SRC_IMAGE"
-          docker pull "$SRC_IMAGE"
-
-          echo "Tagging as RC (plain): $DST_IMAGE"
-          docker tag "$SRC_IMAGE" "$DST_IMAGE"
-          docker push "$DST_IMAGE"
-
-          echo "Tagging as RC (with SHA): $DST_IMAGE_SHA"
-          docker tag "$SRC_IMAGE" "$DST_IMAGE_SHA"
-          docker push "$DST_IMAGE_SHA"
-
-          echo "Successfully promoted ${{ matrix.component.uat_tag }}:${EFFECTIVE_SOURCE} → ${{ matrix.component.uat_tag }}:${RC_VERSION}"
-
-      - name: Wait for Harbor scan (RC plain)
-        uses: SGitHubActions/wait-harbor-scan@develop
+      - name: Setup JFrog CLI
+        uses: SGitHubActions/setup-jfrog-cli@v4
         env:
-          HARBOR_USERNAME: ${{ vars.DOCKER_USERNAME }}
-          HARBOR_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          JF_URL: ${{ vars.JFROG_BASE_URL }}
+          JF_USER: ${{ vars.JFROG_USERNAME }}
+          JF_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+        with:
+          download-repository: jfrog-cli-remote
+
+      - name: Configure JFrog and Poetry
+        run: |
+          jf pip-config --repo-resolve ${{ vars.JFROG_REPO_PYPI }} --server-id-resolve dsp-jfrog
+          pip install poetry | grep -v "Requirement already satisfied"
+          poetry source add --priority=primary myjfrog ${{ vars.JFROG_BASE_URL }}/artifactory/api/pypi/${{ vars.JFROG_REPO_PYPI }}/simple
+          poetry config http-basic.myjfrog ${{ vars.JFROG_USERNAME }} ${{ secrets.JFROG_PASSWORD }}
+          cp /home/runner/.config/pip/pip.conf ./
+          chmod 777 ./pip.conf
+          cp /home/runner/.config/pypoetry/auth.toml ./
+          chmod 777 ./auth.toml
+
+      - name: Build and push RC image
+        uses: SGitHubActions/build-push-action@v3
+        env:
+          JFROG_URL: ${{ vars.JFROG_URL }}${{ vars.KEAR_ID }}
+          JFROG_USERNAME: ${{ vars.JFROG_USERNAME }}
+          JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
         with:
           registry: ${{ vars.HARBOR_URL }}
-          namespace: ${{ vars.HARBOR_NAMESPACE }}
-          repository: ${{ matrix.component.uat_tag }}
-          tag: ${{ needs.prepare-rc.outputs.rc_version }}
-          max-retries: 60
-          sleep-time: 10
-
-      - name: Wait for Harbor scan (RC with SHA)
-        uses: SGitHubActions/wait-harbor-scan@develop
-        env:
-          HARBOR_USERNAME: ${{ vars.DOCKER_USERNAME }}
-          HARBOR_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-        with:
-          registry: ${{ vars.HARBOR_URL }}
-          namespace: ${{ vars.HARBOR_NAMESPACE }}
-          repository: ${{ matrix.component.uat_tag }}
-          tag: ${{ needs.prepare-rc.outputs.rc_version }}-${{ needs.prepare-rc.outputs.source_sha }}
-          max-retries: 60
-          sleep-time: 10
+          tags: |
+            ${{ matrix.component.uat_tag }}:${{ needs.prepare-rc.outputs.rc_version }}
+            ${{ matrix.component.uat_tag }}:${{ needs.prepare-rc.outputs.rc_version }}-${{ needs.prepare-rc.outputs.rc_build_sha }}
+          file: ${{ matrix.component.dockerfile }}
+          push: true
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          build-options: |
+            --no-cache \
+            --secret id=jfrog_url,env=JFROG_URL \
+            --secret id=jfrog_username,env=JFROG_USERNAME \
+            --secret id=jfrog_password,env=JFROG_PASSWORD
 
   create-pr-to-main:
     needs:
@@ -379,13 +360,12 @@ jobs:
           ## Release Candidate Promotion
 
           **RC Version:** ${RC_VERSION}
-          **Triggered by:** ${{ github.actor }}
           **Date (Paris):** ${DATE_PARIS}
 
           ---
 
-          Please review and update the Release Notes section before merging to production.
-          > Release Notes section will be used for the GitHub Release Notes when this PR is merged into main.
+          ⚠️ Please review and update the Release Notes section before merging to production.
+          >  Release Notes section will be used for the GitHub Release Notes when this PR is merged into main.
 
           ---
           ## Description
@@ -464,13 +444,12 @@ jobs:
           ## Release Candidate Promotion
 
           **RC Version:** ${RC_VERSION}
-          **Triggered by:** ${{ github.actor }}
           **Date (Paris):** ${DATE_PARIS}
 
           ---
 
-          Please review and update the Release Notes section before merging to production.
-          > Release Notes section will be used for the GitHub Release Notes when this PR is merged into main.
+          ⚠️ Please review and update the Release Notes section before merging to production.
+          >  Release Notes section will be used for the GitHub Release Notes when this PR is merged into main.
 
           ---
 
@@ -565,11 +544,11 @@ jobs:
             echo ""
 
             echo "## Image Promotion"
+            echo "- Source SHA: ${{ needs.prepare-rc.outputs.source_sha }}"
             echo "- Input DEV Tag: ${{ needs.prepare-rc.outputs.input_source_tag }}"
-            echo "- Effective DEV Tag: ${{ needs.prepare-rc.outputs.effective_source_tag }}"
             echo "- Target RC Tag: ${{ needs.prepare-rc.outputs.rc_version }}"
             echo ""
 
             echo "## Actions Performed"
-            echo "- ✅ DEV image promoted to RC"
+            echo "- DEV image promoted to RC"
           } >> "$GITHUB_STEP_SUMMARY"
